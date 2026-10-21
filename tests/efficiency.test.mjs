@@ -131,3 +131,33 @@ test('a paid schema correction retains the deadline/model and carries the precis
   assert.equal(result.metrics.attempts[0].rejection.validationKeywords[0],'required');assert.deepEqual(result.metrics.attempts[0].correction.tools,['write']);
   const evidence=JSON.parse(await readFile(result.metrics.attempts[0].rejection.evidenceFile,'utf8'));assert.equal(evidence.errorCode,'invalid_tool_arguments');assert.equal(evidence.attempt,1);
 });
+test('raw-newline final reply completes after streaming its prefix, without a paid retry',async t=>{
+  const expected='完成。\n\n所有更改保留。';let calls=0;
+  const transport=await fixture(t,async function*(){
+    calls++;yield {type:'system',subtype:'init',model,session_id:'fixture-session'};
+    const raw='{"action":"final","content":"'+expected+'"}';
+    for(const char of raw)yield {type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:char}}};
+    yield* [...events(raw)].slice(1);
+  });
+  const result=await collect(transport);assert.equal(result.result.choices[0].message.content,expected);assert.equal(calls,1);
+  assert.equal(result.metrics.localDecisionRepairs[0].kind,'json_string_controls');assert.equal(result.metrics.attempts.length,1);
+});
+test('official usage remains inspectable while a correction is pending and the signal aborts',async t=>{
+  let calls=0;const controller=new AbortController();let second;const entered=new Promise(r=>{second=r;});
+  const transport=await fixture(t,async function*(input){
+    if(++calls===1){yield* events('bad JSON');return;}
+    yield {type:'system',subtype:'init',model,session_id:'fixture-session'};second();
+    await new Promise(r=>input.options.abortController.signal.addEventListener('abort',r,{once:true}));
+  });
+  const response=await transport.chat(body,controller.signal);const draining=response.text();await entered;
+  assert.equal(response.bridgeMetrics.knownUsage.prompt_tokens,5000);assert.equal(response.bridgeMetrics.knownUsage.bridge_usage_complete,false);
+  controller.abort(new DOMException('deadline','TimeoutError'));await draining;
+  assert.equal(response.bridgeMetrics.knownUsage.prompt_tokens,5000);assert.equal(response.bridgeMetrics.knownUsage.bridge_usage_complete,false);
+});
+test('deterministic DSML boundary variants are validated and delivered without a model correction',async t=>{
+  let calls=0;const source='<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="write"><｜｜DSML｜｜ parameter name="text" string="true">完整内容\n中文 😀</｜｜DSML｜｜></｜｜DSML｜｜><｜｜DSML｜｜ calls>';
+  const transport=await fixture(t,async function*(){calls++;yield* events(source);});
+  const result=await collect(transport,{...body,tools});assert.equal(calls,1);assert.equal(result.result.usage.bridge_decision_format,'dsml');
+  assert.equal(JSON.parse(result.result.choices[0].message.tool_calls[0].function.arguments).text,'完整内容\n中文 😀');assert.equal(result.metrics.attempts.length,1);
+  assert.equal(transport.metrics.decodedDsml,1);assert.ok(transport.metrics.localDecisionRepairs>0);
+});

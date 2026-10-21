@@ -1,24 +1,14 @@
-import {BridgeError} from './errors.mjs';
-const MARKER='｜｜DSML｜｜';
-const failure=()=>{throw new BridgeError(502,'invalid_decision','WorkBuddy returned an incomplete or ambiguous DSML decision');};
+import {MARKER,attributes,failure} from './dsml-syntax.mjs';
+import {compatibleDsml} from './dsml-compat.mjs';
+import {executionPreamble} from './execution-preamble.mjs';
 /** The SDK can emit its ordinary pre-tool progress sentence before DSML.
  * Keep it as assistant content, but do not mine documentation/code examples. */
-export function decodeDsmlDocument(source){
-  if(source.startsWith('<｜｜DSML｜｜'))return decodeDsml(source);
-  const marker=source.indexOf('<｜｜DSML｜｜');if(marker<0)failure();
-  const before=source.slice(0,marker),content=before.trim();
-  const announcement=/^(?:(?:first|to start)[,:]?\s+)?(?:I['’]ll|I will|Let me|I['’]m going to|I am going to)\s+(?:start|begin|read|check|inspect|look|search|open|use|first)\b/i.test(content)||/^(?:我(?:先|会|将|准备)|先(?:读取|读|查看|检查|搜索)|接下来(?:我会|先))/.test(content);
-  if(!announcement||content.length>1024||!/(?:^|\n)[ \t]*$/.test(before)||/```|[{}]|\b(?:example|syntax|protocol)\s*:/i.test(content))failure();
-  const decision=decodeDsml(source.slice(marker));return {...decision,content};
-}
-function attributes(text,allowed){
-  const attrs=Object.create(null);let rest=text;
-  while(rest.trim()){
-    const match=/^\s+([A-Za-z_][\w.-]*)\s*=\s*"([^"\r\n]*)"/.exec(rest);
-    if(!match||!allowed.includes(match[1])||Object.hasOwn(attrs,match[1]))failure();
-    attrs[match[1]]=match[2];rest=rest.slice(match[0].length);
-  }
-  return attrs;
+export function decodeDsmlDocument(source,onRepair=()=>{}){
+  const preamble=source.startsWith('<｜｜DSML｜｜')?null:executionPreamble(source);
+  if(!source.startsWith('<｜｜DSML｜｜')&&!preamble)failure();
+  const body=preamble?.document??source;let decision;
+  try{decision=decodeDsml(body);}catch(error){const recovered=compatibleDsml(body);decision=recovered.decision;recovered.repairs.forEach(onRepair);}
+  return preamble?{...decision,content:preamble.content}:decision;
 }
 /** Decode complete generated DSML only. Never extract calls from prose, repair
  * broken boundaries, coerce parameter types, or execute any part of the batch. */

@@ -37,7 +37,7 @@ export function createBridge({cfg,provider,key,instanceId,log}){
     const controller=new AbortController();controllers.add(controller);
     const deadline=setTimeout(()=>controller.abort(new DOMException('Deadline exceeded','TimeoutError')),cfg.timeoutMs);deadline.unref();
     const disconnect=()=>{if(!res.writableEnded)controller.abort(new DOMException('Disconnected','AbortError'));};res.on('close',disconnect);req.on('aborted',disconnect);
-    let release,heartbeat,completion,selected,upstream,outcome='failed',errorCode=null,firstEventMs=null,firstTextMs=null,firstThinkingMs=null,transportMetrics=null,queueMs=null;
+    let release,heartbeat,completion,selected,upstream,outcome='failed',errorCode=null,firstEventMs=null,firstTextMs=null,firstThinkingMs=null,transportMetrics=null,queueMs=null,usageSent=false;
     stats.requests++;
     try{
       const body=await readBody(req,cfg.bodyLimit,controller.signal);
@@ -62,17 +62,23 @@ export function createBridge({cfg,provider,key,instanceId,log}){
         if(chunk&&streaming){
           // A tool may execute as soon as the host sees a terminal frame. Hold it
           // until both the final arguments and the upstream [DONE] are verified.
-          if(completion.finish)pending.push(chunk);else await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);
+          if(completion.finish)pending.push(chunk);else{await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);if(chunk.usage)usageSent=true;}
         }
       }
       completion.validate(upstream.tools);
-      if(streaming){for(const chunk of pending)await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);await write(res,'data: [DONE]\n\n',controller.signal);res.end();}
+      if(streaming){for(const chunk of pending){await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);if(chunk.usage)usageSent=true;}await write(res,'data: [DONE]\n\n',controller.signal);res.end();}
       else json(res,200,completion.result());
       stats.completed++;outcome='completed';
     }catch(error){
       const reason=controller.signal.aborted?controller.signal.reason:error;const p=publicError(reason);errorCode=p.body.error.code;
+      // Deadline cancellation stops SSE consumption before the transport can send
+      // its error usage frame. Preserve its latest known official subtotal.
+      const knownUsage=completion?.usage??transportMetrics?.knownUsage??null;
+      if(completion&&!completion.usage&&knownUsage)completion.usage=knownUsage;
       if(errorCode==='cancelled'){stats.cancelled++;outcome='cancelled';}else stats.failed++;
-      if(!res.destroyed&&!res.writableEnded){if(!res.headersSent)json(res,p.status,p.body);else{res.write(`data: ${JSON.stringify(p.body)}\n\n`);res.end();}}
+      if(!res.destroyed&&!res.writableEnded){if(!res.headersSent)json(res,p.status,{...p.body,...(knownUsage?{usage:knownUsage}:{})});else{
+        if(knownUsage&&!usageSent)res.write(`data: ${JSON.stringify({id:completion?.id,created:completion?.created,model:selected?.id,object:'chat.completion.chunk',choices:[],usage:knownUsage})}\n\n`);
+        res.write(`data: ${JSON.stringify(p.body)}\n\n`);res.end();}}
     }finally{
       clearTimeout(deadline);clearInterval(heartbeat);res.removeListener('close',disconnect);req.removeListener('aborted',disconnect);controller.abort();controllers.delete(controller);release?.();
       const row={at:new Date().toISOString(),requestId,model:selected?.id??null,upstream:upstream?.model??null,outcome,errorCode,wallMs:Date.now()-started,

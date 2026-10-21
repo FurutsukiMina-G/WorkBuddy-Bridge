@@ -8,7 +8,9 @@ export class FinalTextProjector {
     if(this.at===null){const start=/^\s*\{\s*"action"\s*:\s*"final"\s*,\s*"content"\s*:\s*"/.exec(this.source);if(!start)return;this.at=start[0].length;}
     while(this.at<this.source.length){
       const c=this.source[this.at];if(c==='"'){this.closed=true;this.at++;break;}
-      if(c!=='\\'){if(c.charCodeAt(0)<32){this.broken=true;break;}this.decoded+=c;this.at++;continue;}
+      // The terminal parser escapes raw string controls losslessly. Project the
+      // same literal newline/tab now, instead of abandoning an otherwise final reply.
+      if(c!=='\\'){this.decoded+=c;this.at++;continue;}
       if(this.at+1>=this.source.length)break;const e=this.source[this.at+1];
       if(e==='u'){if(this.at+6>this.source.length)break;const hex=this.source.slice(this.at+2,this.at+6);if(!/^[\da-f]{4}$/i.test(hex)){this.broken=true;break;}this.decoded+=String.fromCharCode(parseInt(hex,16));this.at+=6;}
       else{const escapes={'"':'"','\\':'\\','/':'/',n:'\n',r:'\r',t:'\t',b:'\b',f:'\f'};if(!Object.hasOwn(escapes,e)){this.broken=true;break;}this.decoded+=escapes[e];this.at+=2;}

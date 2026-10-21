@@ -24,3 +24,18 @@ test('authenticated metrics exclude role-only frames from first model event time
   assert.equal(metrics.requests,1);assert.equal(metrics.tokens.total,12);assert.equal(metrics.tokens.cacheRead,null);
   assert.equal(f.records[0].firstEventMs,f.records[0].firstTextMs);
 });
+test('deadline failure retains known correction usage exactly once without a success frame',async t=>{
+  const usage={prompt_tokens:123284,completion_tokens:43667,total_tokens:166951,bridge_usage_complete:false};
+  const f=await fixture(t,async(body,signal)=>{
+    const response=new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(frame({role:'assistant'})));signal.addEventListener('abort',()=>c.close(),{once:true});}}));
+    response.bridgeMetrics={knownUsage:usage,attempts:[{usage:{prompt_tokens:61477,completion_tokens:15033}},{usage:{prompt_tokens:61807,completion_tokens:28634}}]};return response;
+  });
+  const text=await(await f.request({stream:true})).text();assert.match(text,/timeout/);assert.ok(!text.includes('[DONE]'));
+  const events=text.split('\n\n').filter(s=>s.startsWith('data: {')).map(s=>JSON.parse(s.slice(6)));
+  assert.equal(events.filter(e=>e.usage).length,1);assert.deepEqual(events.find(e=>e.usage).usage,usage);assert.deepEqual(f.records[0].usage,usage);
+});
+test('upstream error usage already delivered is not duplicated by the server error handler',async t=>{
+  const usage={prompt_tokens:42,completion_tokens:7,total_tokens:49};
+  const f=await fixture(t,async()=>new Response(frame({},null,usage)+'data: {"error":{"code":"invalid_decision","message":"bad"}}\n\n'));
+  const raw=await(await f.request({stream:true})).text();assert.equal((raw.match(/"prompt_tokens":42/g)??[]).length,1);assert.match(raw,/invalid_decision/);
+});

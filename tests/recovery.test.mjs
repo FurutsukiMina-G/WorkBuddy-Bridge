@@ -49,3 +49,11 @@ test('correction usage is distinct from first attempts and local envelope repair
   assert.equal(result.correctionCalls,1);assert.deepEqual(result.correctionTokens,{prompt:300,completion:9,reportedAttempts:1,unknownAttempts:0,requestsWithoutAttemptDetails:0});assert.equal(result.localDecisionRepairs,1);assert.equal(result.localReplays,0);
   assert.equal(summarize([{outcome:'failed'}]).correctionTokens.requestsWithoutAttemptDetails,1);
 });
+test('historical timed-out attempts contribute only their known subtotal and never overwrite the original log',()=>{
+  const a={prompt_tokens:61477,completion_tokens:15033,total_tokens:76510},b={prompt_tokens:61807,completion_tokens:28634,total_tokens:90441};
+  const row={outcome:'failed',errorCode:'timeout',usage:null,context:{attempts:[{usage:a},{usage:b},{usage:null}]}};
+  const result=summarize([row]);assert.equal(result.tokens.prompt,123284);assert.equal(result.tokens.completion,43667);
+  assert.equal(result.tokens.incompleteRequests,1);assert.equal(result.tokens.recoveredUsageRequests,1);assert.equal(row.usage,null);
+  const already={...row,usage:{prompt_tokens:123284,completion_tokens:43667,total_tokens:166951,bridge_usage_complete:false}};
+  assert.equal(summarize([already]).tokens.prompt,123284);assert.equal(summarize([already]).tokens.recoveredUsageRequests,0);
+});

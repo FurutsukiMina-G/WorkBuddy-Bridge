@@ -6,7 +6,7 @@ export const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 export function config(env=process.env) {
   const candidates=[env.LOCALAPPDATA&&join(env.LOCALAPPDATA,'CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info'),join(homedir(),'AppData/Local/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info'),env.APPDATA&&join(env.APPDATA,'CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info')].filter(Boolean);
   const number=(key, fallback,min,max)=>{const n=Number(env[key]??fallback);if(!Number.isSafeInteger(n)||n<min||n>max)throw new Error(`Invalid ${key}`);return n;};
-  return {version:'0.2.1',root:ROOT,runtime:resolve(env.WORKBUDDY_RUNTIME_DIR??join(ROOT,'.runtime')),reports:resolve(env.WORKBUDDY_REPORTS_DIR??join(ROOT,'reports')),cliPath:env.WORKBUDDY_CLI,
+  return {version:'0.2.3',root:ROOT,runtime:resolve(env.WORKBUDDY_RUNTIME_DIR??join(ROOT,'.runtime')),reports:resolve(env.WORKBUDDY_REPORTS_DIR??join(ROOT,'reports')),cliPath:env.WORKBUDDY_CLI,
     authFile:env.WORKBUDDY_AUTH_FILE??candidates.find(existsSync)??candidates[0],
     upstreamModel:env.WORKBUDDY_MODEL??'deepseek-v4.1-flash',
     port:number('WORKBUDDY_PORT',8647,1024,65535),timeoutMs:number('WORKBUDDY_TIMEOUT_MS',300000,1000,1800000),

@@ -57,6 +57,12 @@ export class SdkTransport {
         const chunk=(delta,finish=null,usage=null)=>({id,created,model:body.model,object:'chat.completion.chunk',choices:[{index:0,delta,finish_reason:finish}],usage});
         void (async()=>{
           let output=new DecisionOutput(),usageRecorded=false,attemptPriorUsage=record.lastSdkUsage,attemptResumed=!!record.sessionId;const usages=[];let success=false;
+          const snapshotUsage=()=>{
+            const current=usageRecorded?[]:[normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})})];
+            const usage=sumUsage([...usages,...current]);
+            metrics.knownUsage=usage&&!usageRecorded?{...usage,bridge_usage_complete:false}:usage;
+            return metrics.knownUsage;
+          };
           try{
             send(chunk({role:'assistant',content:''}));
             const failure=this.failures.get(failureKey);
@@ -71,6 +77,7 @@ export class SdkTransport {
             for(let attempt=0;;attempt++){
               signal.throwIfAborted();usageRecorded=false;output=new DecisionOutput();
               attemptPriorUsage=record.lastSdkUsage;attemptResumed=!!record.sessionId;
+              snapshotUsage();
               let initialized=false,chars=0;const attemptStart=performance.now();
               const needsTool=body.tool_choice==='required'||typeof body.tool_choice==='object';
               projector=new FinalTextProjector(text=>send(chunk({content:text})),{enabled:!needsTool});
@@ -81,6 +88,7 @@ export class SdkTransport {
               for await(const m of q){
                 signal.throwIfAborted();if(m.isReplay)continue;
                 output.observe(m);
+                if(m.type==='assistant'||m.type==='result'||m.event?.usage||m.event?.message?.usage)snapshotUsage();
                 if(m.type==='system'&&m.subtype==='init'){
                   if(m.model!==body.model)throw new BridgeError(502,'model_mismatch','Official WorkBuddy runtime selected a different model');
                   if(m.mcp_servers?.length||m.plugins?.length||m.skills?.length)throw new BridgeError(502,'isolation_failed','Official runtime loaded external tools, plugins or skills');
@@ -107,6 +115,7 @@ export class SdkTransport {
               }
               const result=output.result;
               usages.push(normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})}));usageRecorded=true;
+              snapshotUsage();
               if(result?.usage)record.lastSdkUsage=result.usage;
               metrics.attempts.push({attempt:attempt+1,wallMs:performance.now()-attemptStart,usage:usages.at(-1),usageBasis:output.usageBasis,promptCharacters:prompt.length});
               if(!initialized||!result||result.subtype!=='success'||result.is_error){
@@ -179,6 +188,7 @@ export class SdkTransport {
             }
             if(!usageRecorded){usages.push(normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})}));metrics.attempts.push({attempt:usages.length,usage:usages.at(-1),usageBasis:output.usageBasis,errorCode:safe.body.error.code});}
             const usage=sumUsage(usages);
+            metrics.knownUsage=usage;
             if(usage)send({id,created,model:body.model,object:'chat.completion.chunk',choices:[],usage});
             send(safe.body);
           }finally{

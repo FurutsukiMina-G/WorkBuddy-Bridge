@@ -1,4 +1,12 @@
-export function summarize(rows){
+import {sumUsage} from './usage.mjs';
+export function summarize(input){
+  const rows=input.map(row=>{
+    if(row.usage)return row;
+    const attempts=row.context?.attempts;
+    const subtotal=row.context?.knownUsage??(Array.isArray(attempts)?sumUsage(attempts.map(a=>a.usage??null)):null);
+    if(!subtotal)return row;
+    return {...row,recoveredUsage:true,usage:{...subtotal,...(['timeout','cancelled'].includes(row.errorCode)?{bridge_usage_complete:false}:{})}};
+  });
   const n=v=>typeof v==='number'&&Number.isFinite(v);
   const p50=values=>{const sorted=values.filter(n).sort((a,b)=>a-b);return sorted.length?sorted[Math.floor(sorted.length/2)]:null;};
   const local=r=>r.context?.localReplay||['local-response-replay','local-rejection-replay'].includes(r.usage?.bridge_usage_source);
@@ -16,7 +24,8 @@ export function summarize(rows){
     correctionTokens:{prompt:sum(knownCorrections,a=>a.usage.prompt_tokens),completion:sum(knownCorrections,a=>a.usage.completion_tokens),
       reportedAttempts:knownCorrections.length,unknownAttempts:corrections.length-knownCorrections.length,
       requestsWithoutAttemptDetails:inference.filter(r=>!Array.isArray(r.context?.attempts)).length},
-    tokens:{reportedRequests:billed.length,unknownRequests:rows.filter(r=>!r.usage).length,prompt,completion:sum(billed,r=>r.usage.completion_tokens),
+    tokens:{reportedRequests:billed.length,unknownRequests:rows.filter(r=>!r.usage).length,incompleteRequests:rows.filter(r=>r.usage?.bridge_usage_complete===false).length,
+      recoveredUsageRequests:rows.filter(r=>r.recoveredUsage).length,prompt,completion:sum(billed,r=>r.usage.completion_tokens),
       total:sum(billed,r=>r.usage.total_tokens),cacheRead:cache.length?cached:null,cacheWrite:billed.some(r=>n(r.usage.cache_creation_input_tokens))?sum(billed,r=>r.usage.cache_creation_input_tokens):null,
       cacheReportedRequests:cache.length,cacheHitRatio:cachePrompt?cached/cachePrompt:null},
     medianFirstTextMs:p50(inference.map(r=>r.firstTextMs)),medianFirstThinkingMs:p50(inference.map(r=>r.firstThinkingMs)),medianWallMs:p50(inference.map(r=>r.wallMs)),
