@@ -1,0 +1,20 @@
+import {mkdir,writeFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {rpc} from './dsh-rpc.mjs';
+import {cfg,localApi} from './local-api.mjs';
+import {PUBLIC_MODEL} from '../src/protocol.mjs';
+const tool=process.argv[2]??'read';if(!['read','pwsh'].includes(tool))throw new Error('Use read or pwsh');
+const health=await (await localApi('/health')).json();
+const bridgeModels=await (await localApi('/v1/models')).json();
+if(!health.ready||health.provider?.transport!=='official-workbuddy-sdk'||!/^deepseek-v[0-9.]+-flash$/.test(health.provider?.verifiedModel??'')||
+  !bridgeModels.data?.some(m=>m.id===PUBLIC_MODEL&&m.upstream_id===health.provider.verifiedModel))throw new Error('WorkBuddy Flash provider/model identity is not verified');
+const settings=await rpc('settings/describe');const provider=settings.namespaces.find(n=>n.ns==='llm-pi-ai')?.user?.providers?.workbuddybridge;
+if(provider?.baseURL!==`http://127.0.0.1:${cfg.port}/v1`||provider.api!=='openai-completions'||!provider.models?.some(m=>m.id===PUBLIC_MODEL))throw new Error('DSH provider does not point to this verified WorkBuddy Flash bridge');
+const cwd=join(cfg.runtime,'dsh-smoke',randomUUID());await mkdir(cwd,{recursive:true});const marker=`WB_NATIVE_${randomUUID()}`;await writeFile(join(cwd,'sentinel.txt'),marker+'\n');
+const {sessionId}=await rpc('session/create',{request:{cwd}});
+await rpc('session/selectModel',{request:{sessionId,provider:'workbuddybridge',model:PUBLIC_MODEL}});
+await rpc('session/rename',{request:{sessionId,title:`WorkBuddy Bridge SDK native ${tool} validation`}});
+const boundary='This is one fully scoped interface check. Read only sentinel.txt in the supplied workspace; do not inspect other files, edit anything, access the network, spawn agents, or continue any broader task. Stop after returning the result. ';
+await rpc('session/prompt',{request:{sessionId,requestId:randomUUID(),mode:'queue',content:[{type:'text',text:boundary+(tool==='read'?'Use your native read tool to read sentinel.txt in this workspace. Return only its exact content after the tool returns. Never guess.':"Use your native pwsh tool to run Get-Content -LiteralPath 'sentinel.txt' in this workspace. Return only its exact content after the tool returns. Never guess.")}]}});
+const report={sessionId,cwd,tool,marker,verifiedProvider:'workbuddybridge',verifiedModel:health.provider.verifiedModel,createdAt:new Date().toISOString()};await mkdir(cfg.reports,{recursive:true});await writeFile(join(cfg.reports,`dsh-smoke-${tool}.json`),JSON.stringify(report,null,2));console.log(JSON.stringify(report));

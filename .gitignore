@@ -1,0 +1,23 @@
+node_modules/
+.runtime/
+reports/
+releases/
+*.zip
+__pycache__/
+.env
+.env.*
+!.env.example
+
+# Machine-local workspace layout note (install path, migrated chat archives).
+docs/项目目录.md
+
+# Never commit logs, usage records, or credentials even if written outside the folders above.
+*.log
+*.ndjson
+bridge-key
+instance-id
+auth-cache.json
+dsh-connection.json
+*.pem
+*.key
+*.pfx

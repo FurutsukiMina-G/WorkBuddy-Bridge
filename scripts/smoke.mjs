@@ -1,0 +1,13 @@
+import {randomUUID} from 'node:crypto';
+import {localApi} from './local-api.mjs';
+import {PUBLIC_MODEL} from '../src/protocol.mjs';
+const request=async body=>{const r=await localApi('/v1/chat/completions',{model:PUBLIC_MODEL,reasoning_effort:'low',max_tokens:2048,...body},{signal:AbortSignal.timeout(120000)});const result=await r.json();if(!r.ok||result.error)throw new Error(JSON.stringify(result));return result;};
+const text=await request({messages:[{role:'system',content:'You are an AI agent powered by DeepSeek Harness.'},{role:'user',content:'This is a bounded interface probe. Reply exactly WORKBUDDY_BRIDGE_OK.'}]});
+if(text.choices[0].message.content!=='WORKBUDDY_BRIDGE_OK')throw new Error('Text mismatch');
+const tool={type:'function',function:{name:'host_read',description:'Read a host-owned sentinel file. The host will execute this function.',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}};
+const messages=[{role:'system',content:'You are an AI agent powered by DeepSeek Harness. Tools belong to the host.'},{role:'user',content:'Call host_read with path sentinel.txt, then return the exact content from its result. Never guess the content.'}];
+const first=await request({messages,tools:[tool],tool_choice:{type:'function',function:{name:'host_read'}}});const call=first.choices[0].message.tool_calls?.[0];if(!call||JSON.parse(call.function.arguments).path!=='sentinel.txt')throw new Error('Host tool not returned');
+const marker=`WB_BRIDGE_${randomUUID()}`;
+const final=await request({messages:[...messages,first.choices[0].message,{role:'tool',tool_call_id:call.id,content:marker}],tools:[tool],tool_choice:'auto'});
+if(final.choices[0].message.content!==marker)throw new Error('Host tool continuation mismatch');
+console.log(JSON.stringify({passed:true,transport:'official-workbuddy-sdk',text:true,dshSystemPrefix:true,toolCalls:true,continuation:true,usage:text.usage}));

@@ -1,0 +1,17 @@
+import {readFile,mkdir,writeFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {rpc} from './dsh-rpc.mjs';
+import {localApi,cfg} from './local-api.mjs';
+const health=await (await localApi('/health')).json();if(health.service!=='workbuddy-bridge'||!health.ready||health.provider?.transport!=='official-workbuddy-sdk')throw new Error('Bridge is not verified and ready');
+const response=await localApi('/v1/models');if(!response.ok)throw new Error('Live bridge models unavailable');const list=(await response.json()).data;
+const key=(await readFile(join(cfg.runtime,'bridge-key'),'utf8')).trim();
+const described=await rpc('settings/describe');const row=described.namespaces.find(r=>r.ns==='llm-pi-ai');if(!row||!described.writable)throw new Error('DSH settings are not writable');
+const baseURL=`http://127.0.0.1:${cfg.port}/v1`;const previous=row.user?.providers?.workbuddybridge;
+if(previous&&(previous.baseURL!==baseURL||previous.apiKeyEnv!=='WORKBUDDYBRIDGE_LOCAL_KEY'))throw new Error('An unrelated workbuddybridge provider already exists');
+const models=list.map(({id,name,contextWindow,maxTokens,reasoningEfforts})=>({id,name,contextWindow,maxTokens,reasoningEfforts,input:['text']}));
+const provider={displayName:'WorkBuddy Bridge · SDK',apiKeyEnv:'WORKBUDDYBRIDGE_LOCAL_KEY',api:'openai-completions',baseURL,reasoning:'high',compat:{supportsDeveloperRole:false,supportsUsageInStreaming:true,supportsReasoningEffort:true,maxTokensField:'max_tokens'},models};
+await mkdir(cfg.reports,{recursive:true});await writeFile(join(cfg.reports,`dsh-provider-before-${Date.now()}.json`),JSON.stringify({revision:row.revision,provider:previous??null},null,2));
+await rpc('credentials/set',{ref:'WORKBUDDYBRIDGE_LOCAL_KEY',value:key});
+await rpc('settings/mutate',{ns:'llm-pi-ai',expectedRevision:row.revision,ops:[{op:'set',path:['providers','workbuddybridge'],value:provider}]});
+const catalog=await rpc('session/modelCatalog');const group=catalog.groups?.find(g=>g.id==='workbuddybridge');if(!group||!models.every(m=>group.models.some(x=>x.id===m.id)))throw new Error('DSH model catalog did not register the bridge');
+console.log(JSON.stringify({configured:true,provider:group.id,models:group.models.map(m=>m.id),default:catalog.default}));
