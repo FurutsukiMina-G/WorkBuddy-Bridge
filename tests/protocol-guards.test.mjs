@@ -19,6 +19,27 @@ test('split markers and argument objects are never streamed before they can be r
   let shown='';const gate=new NativeTextGate(t=>{shown+=t;},{params});for(const part of ['<b>粗体</b> 与 ','<parag','raph> 是普通 HTML。'])gate.push(part);gate.pump(true);
   assert.equal(shown,'<b>粗体</b> 与 <paragraph> 是普通 HTML。');
 });
+
+test('multiline JSON heads stay private across every possible stream split',()=>{
+  for(const text of ['{\n  "file_path": "a.ts",\n  "content": "fixture"\n}',
+    '{\r\n  "action"\r\n  :\r\n  "tool_calls", "calls": []}',
+    '{\n  "calls"\n  :\n  []}', '{\n  "file\\u005fpath": "a.ts"}']){
+    assert.equal(protocolAt(text,params),0,text);
+    for(let split=1;split<text.length;split++){
+      let shown='';const gate=new NativeTextGate(delta=>{shown+=delta;},{params});
+      gate.push(text.slice(0,split));gate.push(text.slice(split));
+      assert.equal(shown,'',`${text} at ${split}`);assert.equal(gate.blocked,true);
+    }
+    let shown='';const gate=new NativeTextGate(delta=>{shown+=delta;},{params});
+    for(const char of text)gate.push(char);assert.equal(shown,'');assert.equal(gate.blocked,true);
+  }
+  for(const text of ['{\n  "theme": "dark"\n}', '```json\n{\n "file_path": "example"\n}\n```',
+    '例子：`{"action":"final","content":"example"}`']){
+    assert.equal(protocolAt(text,params),-1,text);
+    let shown='';const gate=new NativeTextGate(delta=>{shown+=delta;},{params});
+    for(const char of text)gate.push(char);gate.pump(true);assert.equal(shown,text);
+  }
+});
 test('short announcements wait for the turn; long answers and finished reports stream',()=>{
   let shown='';const gate=new NativeTextGate(t=>{shown+=t;});gate.push('我先读取配置文件');assert.equal(shown,'');
   gate.push('，然后'+'逐项说明每个字段的含义与默认值。'.repeat(20));assert.ok(shown.length>200);

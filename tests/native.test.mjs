@@ -145,6 +145,91 @@ test('printed host arguments are held back and corrected into a native call',asy
   const {result,contents}=await collect(transport);
   assert.equal(seen.length,2);assert.deepEqual(contents,[]);assert.equal(result.choices[0].message.tool_calls[0].function.name,'write');
 });
+
+test('pretty-printed host arguments never stream and are corrected into a native call',async t=>{
+  const text='{\n  "file_path": "a.ts",\n  "content": "fixture"\n}';
+  const {transport,seen}=await fixture(t,[{text},{calls:[{id:'call_pretty',name:'write',input:{file_path:'a.ts',content:'fixture'}}]}]);
+  const {result,contents,metrics}=await collect(transport);
+  assert.equal(seen.length,2);assert.deepEqual(contents,[]);assert.equal(result.choices[0].message.tool_calls[0].id,'call_pretty');
+  assert.equal(metrics.attempts[0].errorCode,'invalid_decision');
+});
+
+test('unfenced documentation cannot become an executable legacy call',async t=>{
+  for(const document of [JSON.stringify({action:'tool_calls',calls:[{name:'write',arguments:{file_path:'example.txt',content:'fixture'}}]}),
+    '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="write">\n<｜｜DSML｜｜ parameter name="file_path" string="true">example.txt</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="content" string="true">fixture</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>']){
+    const {transport,seen}=await fixture(t,[{text:'下面是调用示例，请勿执行：\n'+document},{text:'该示例仅用于说明格式。'}]);
+    const {result,raw,metrics}=await collect(transport);
+    assert.equal(seen.length,2);assert.equal(result.choices[0].finish_reason,'stop');assert.equal(result.choices[0].message.tool_calls,undefined);
+    assert.equal(metrics.attempts[0].errorCode,'invalid_decision');assert.ok(!raw.includes('example.txt'));assert.equal(transport.metrics.hostCalls,0);
+  }
+});
+
+test('legacy execution preambles still decode as whole documents',async t=>{
+  const text='先读取 a.ts。\n'+JSON.stringify({action:'tool_calls',calls:[{name:'read',arguments:{file_path:'a.ts'}}]});
+  const {transport,seen}=await fixture(t,[{text}]);const {result}=await collect(transport);
+  assert.equal(seen.length,1);assert.equal(result.choices[0].message.content.trim(),'先读取 a.ts。');
+  assert.equal(result.choices[0].message.tool_calls[0].function.name,'read');
+});
+
+test('explicit JSON response formats preserve business fields and protocol examples exactly',async t=>{
+  const documents=[JSON.stringify({action:'final',content:'business-json'}),
+    JSON.stringify({action:'tool_calls',calls:[{name:'write',arguments:{file_path:'example.txt',content:'fixture'}}]}),
+    '{\n  "file_path": "example.txt",\n  "content": "<｜｜DSML｜｜ calls>"\n}'];
+  for(const type of ['json_object','json_schema'])for(const text of documents){
+    const {transport,seen}=await fixture(t,[{text}]);
+    const {result,contents}=await collect(transport,{...body,response_format:{type,...(type==='json_schema'?{json_schema:{name:'answer',schema:{type:'object'}}}:{})}});
+    assert.equal(seen.length,1);assert.equal(result.choices[0].message.content,text);assert.equal(contents.join(''),text);assert.ok(contents.length>1);
+    assert.equal(result.choices[0].finish_reason,'stop');assert.equal(result.choices[0].message.tool_calls,undefined);
+    assert.deepEqual(JSON.parse(result.choices[0].message.content),JSON.parse(text));assert.match(seen[0].prompt,/JSON document requested by response_format/);
+  }
+});
+
+test('response_format text keeps the native call guard enabled',async t=>{
+  const {transport,seen}=await fixture(t,[{text:'{\n"file_path":"a.ts"\n}'},{calls:[{id:'call_text',name:'read',input:{file_path:'a.ts'}}]}]);
+  const {result,contents}=await collect(transport,{...body,response_format:{type:'text'}});
+  assert.equal(seen.length,2);assert.deepEqual(contents,[]);assert.equal(result.choices[0].message.tool_calls[0].id,'call_text');
+});
+
+test('native call prefixes require a successful terminal result or the exact expected runtime stop',async t=>{
+  const failures=[
+    {error:new Error('Transport closed before terminal response'),code:'upstream_failure'},
+    {error:new Error('HTTP 400 code 11128 unapproved channel'),code:'workbuddy_11128'},
+    {code:'sdk_incomplete'},
+    {messageStop:true,code:'sdk_incomplete'},
+    {result:{type:'result',subtype:'error_during_execution',is_error:true,errors:['unapproved channel 11128']},code:'workbuddy_11128'},
+    {result:{type:'result',subtype:'error_during_execution',is_error:true,errors:['Transport closed']},code:'sdk_incomplete'},
+    {error:Object.assign(new Error('Max turns (1) exceeded'),{errors:['Max turns (1) exceeded','Transport closed']}),code:'upstream_failure'},
+    {error:new Error('Max turns (2) exceeded'),code:'upstream_failure'},
+  ];
+  for(const failure of failures){
+    const {transport}=await fixture(t,[]);
+    transport.run=async function*(){
+      yield {type:'system',subtype:'init',model,session_id:'incomplete-session',mcp_servers:[{name:'host',status:'connected'}]};
+      yield {type:'stream_event',event:{type:'message_start',message:{model,usage}}};
+      yield {type:'stream_event',event:{type:'content_block_start',index:2,content_block:{type:'tool_use',id:'first_of_batch',name:'mcp__host__read',input:{}}}};
+      yield {type:'stream_event',event:{type:'content_block_delta',index:2,delta:{type:'input_json_delta',partial_json:'{"file_path":"a.ts"}'}}};
+      yield {type:'stream_event',event:{type:'content_block_stop',index:2}};
+      if(failure.messageStop)yield {type:'stream_event',event:{type:'message_stop'}};
+      if(failure.result)yield failure.result;
+      if(failure.error)throw failure.error;
+    };
+    const {raw,metrics}=await collect(transport);
+    assert.match(raw,new RegExp('"code":"'+failure.code+'"'));assert.ok(!raw.includes('[DONE]'));assert.ok(!raw.includes('"tool_calls":['));
+    assert.equal(transport.metrics.started,1);assert.equal(transport.metrics.hostCalls,0);assert.equal(transport.warm.stats.started,0);
+    assert.equal(metrics.knownUsage.prompt_tokens,5000);assert.equal(metrics.knownUsage.prompt_tokens_details.cached_tokens,4000);
+  }
+});
+
+test('a successful native terminal result confirms the complete call batch',async t=>{
+  const {transport}=await fixture(t,[{calls:[{id:'call_success',name:'read',input:{file_path:'a.ts'}}]}]);
+  const original=transport.run;
+  transport.run=async function*(input){
+    try{yield* original(input);}catch(error){
+      assert.match(error.message,/^Max turns/);yield {type:'result',subtype:'success',is_error:false,usage};
+    }
+  };
+  const {result}=await collect(transport);assert.equal(result.choices[0].message.tool_calls[0].id,'call_success');
+});
 test('schema-invalid native arguments get a native correction with the validation detail',async t=>{
   const {transport,seen}=await fixture(t,[{calls:[{id:'call_00_X',name:'write',input:{file_path:'a.ts'}}]},{calls:[{id:'call_00_Y',name:'write',input:{file_path:'a.ts',content:'ok'}}]}]);
   const {result,metrics}=await collect(transport);

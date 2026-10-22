@@ -11,7 +11,7 @@ import {FinalTextProjector} from './streaming.mjs';
 import {normalizedUsage,sumUsage,replayUsage,addSdkUsage} from './usage.mjs';
 import {correctionInput} from './recovery.mjs';
 import {rejectedEvidence,decisionErrorEvidence,redactSecrets} from './rejection-evidence.mjs';
-import {HOST,PREFIX,FORWARDED,NATIVE_INSTRUCTIONS,nativeSupported,hostTools,hostServer,nativeInput,nativeCorrection,nativeDecision,NativeTextGate} from './native.mjs';
+import {HOST,PREFIX,FORWARDED,NATIVE_INSTRUCTIONS,nativeSupported,hostTools,hostServer,nativeInput,nativeCorrection,nativeDecision,NativeTextGate,structuredResponse} from './native.mjs';
 import {WarmRuntimes,promptQueue,userMessage} from './warm.mjs';
 export {normalizedUsage} from './usage.mjs';
 // Explicit denies complement tools:[] on WorkBuddy builds that still enumerate
@@ -20,7 +20,11 @@ const DENIED_TOOLS=['Agent','Read','Write','Edit','Bash','Glob','Grep','PowerShe
 const RETRYABLE=['invalid_decision','invalid_tool_arguments','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn'];
 const WARM_DELAY_MS=25,WARM_READY_MS=20000;
 // The runtime's own message once a denied host call has used the single permitted turn.
-const RUNTIME_STOP=/^Max turns \(\d+\) exceeded\.?$/i;
+const RUNTIME_STOP=/^Max turns \(1\) exceeded\.?$/i;
+// The SDK throws ExecutionError before yielding an error result. Every reported reason
+// must be the expected stop; a second transport/auth error must never be swallowed.
+const expectedCallStop=error=>RUNTIME_STOP.test(String(error?.message??'').trim())&&
+  (error.errors===undefined||Array.isArray(error.errors)&&error.errors.length>0&&error.errors.every(e=>RUNTIME_STOP.test(String(e).trim())));
 export function sdkOptions(cfg,credential,body,dir,controller,onDenied,onStderr=()=>{},{native=false}={}){
   const cli=runtimePath(cfg);
   if(!existsSync(cli))throw new BridgeError(503,'runtime_missing','WorkBuddy runtime missing; set WORKBUDDY_CLI to its official codebuddy-lite-wb.mjs');
@@ -118,7 +122,7 @@ export class SdkTransport {
             }
             let decision,source,format,projector,gate,repairs;const rejected=new Set();
             const retryLimit=this.cfg.decisionRetries??2;
-            const params=new Set(body.response_format?[]:(body.tools??[]).flatMap(t=>Object.keys(t.function?.parameters?.properties??{})));
+            const params=new Set((body.tools??[]).flatMap(t=>Object.keys(t.function?.parameters?.properties??{})));
             // Native text already shown by a rejected attempt; later attempts append to it.
             let carried='',unfinishedCorrected=false,warmFailed=false;
             for(let attempt=0;;attempt++){
@@ -127,7 +131,7 @@ export class SdkTransport {
               snapshotUsage();
               let initialized=false,chars=0;const attemptStart=performance.now();
               const needsTool=body.tool_choice==='required'||typeof body.tool_choice==='object';
-              if(native)gate=new NativeTextGate(text=>send(chunk({content:text})),{enabled:!needsTool&&!carried,params});
+              if(native)gate=new NativeTextGate(text=>send(chunk({content:text})),{enabled:!needsTool&&!carried,params,structured:structuredResponse(body)});
               else projector=new FinalTextProjector(text=>send(chunk({content:text})),{enabled:!needsTool});
               const stderr=s=>{runtimeStderr=(runtimeStderr+s).slice(-3000);};
               const warm=attempt===0&&native&&!warmFailed?await this.takeWarm(record,body,credential,native,signal):null;
@@ -196,7 +200,7 @@ export class SdkTransport {
                 // A prestarted runtime that failed before initializing is replaced once, cold.
                 if(warm&&!initialized&&!signal.aborted&&!(error instanceof BridgeError)){this.warm.fail(warm);warmFailed=true;metrics.warmStart=false;metrics.warmFailed=true;attempt--;continue;}
                 // A native host call ends with the runtime's own stop after its denial; the call is complete.
-                closeCall();if(error instanceof BridgeError||signal.aborted||!native||!calls.length)throw error;
+                closeCall();if(error instanceof BridgeError||signal.aborted||!native||!calls.length||!expectedCallStop(error))throw error;
                 stoppedAtCall=true;
               }finally{if(relay)controller.signal.removeEventListener('abort',relay);}
               closeCall();
@@ -206,7 +210,9 @@ export class SdkTransport {
               if(result?.usage)record.lastSdkUsage=result.usage;
               else if(stoppedAtCall)record.lastSdkUsage=addSdkUsage(attemptResumed?record.lastSdkUsage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0},output.usage(attemptPriorUsage,{resumed:attemptResumed}));
               metrics.attempts.push({attempt:attempt+1,wallMs:performance.now()-attemptStart,usage:usages.at(-1),usageBasis:output.usageBasis,promptCharacters:prompt.length,...(warm?{warm:true}:{})});
-              if(!(native&&calls.length&&initialized)&&(!initialized||!result||result.subtype!=='success'||result.is_error)){
+              const successfulResult=result?.subtype==='success'&&!result.is_error;
+              const expectedNativeStop=native&&calls.length&&stoppedAtCall&&!result;
+              if(!initialized||!(successfulResult||expectedNativeStop)){
                 const message=(result?.errors??[]).join(' ');
                 if(/11128|unapproved channel|conversation id missing/i.test(message))throw new BridgeError(400,'workbuddy_11128','WorkBuddy official runtime was rejected by channel validation (11128); no blind retry was performed');
                 if(/401|authentication|12153/i.test(message))throw new BridgeError(401,'workbuddy_auth_rejected','WorkBuddy official runtime rejected the login; reopen WorkBuddy and retry');

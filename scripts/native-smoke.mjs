@@ -59,6 +59,12 @@ try{
   // 3. A long final answer streams as plain text before the turn ends.
   const stream=await request({prompt_cache_key:randomUUID(),messages:[system,{role:'user',content:'No tools are needed. Reply with the integers 1 through 120 in order, separated by spaces, and nothing else.'}]});
   assert.ok(stream.message.content.trim().startsWith('1 2 3'));assert.ok(stream.firstTextMs<stream.finishedAtMs);
+  // 4. Business JSON may use old bridge field names without being unwrapped or dispatched.
+  const jsonAnswer={action:'final',content:'WB_JSON_FIXTURE'};
+  const json=await request({prompt_cache_key:randomUUID(),response_format:{type:'json_object'},
+    messages:[system,{role:'user',content:'No tools are needed. Return exactly this JSON document with no markdown or extra text: '+JSON.stringify(jsonAnswer)}]});
+  assert.equal(json.finish,'stop');assert.deepEqual(JSON.parse(json.message.content),jsonAnswer);
+  steps.push({step:'json-response',finish:json.finish,preserved:true});
   report={passed:true,at:new Date().toISOString(),transport:'official-workbuddy-sdk',toolMode:'native',verifiedModel:provider.model.id,hostTools:tools.length,
     steps,streaming:{firstTextMs:stream.firstTextMs,finishedAtMs:stream.finishedAtMs},summary:summarize(rows),requests:rows,warm:provider.transport.warm.stats};
 }catch(error){report={passed:false,at:new Date().toISOString(),error:String(error.message),steps,summary:summarize(rows),requests:rows,provider:provider.status()};process.exitCode=1;}

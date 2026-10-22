@@ -7,13 +7,14 @@ export const HOST='host',PREFIX=`mcp__${HOST}__`;
 // The runtime records this as the denied call's tool_result, so the next turn reads naturally.
 export const FORWARDED='Forwarded to the external host for execution. The host returns its result in the next user message under this call id; do not repeat the call before then.';
 export const NATIVE_INSTRUCTIONS=`You are providing model turns to an external host (DeepSeek Harness). The host owns planning context, tools, files, shell, permissions, subagents and all side effects. The host's functions are available to you natively as ${PREFIX}<name>: call them through native function calling with complete arguments that satisfy their schemas. Never call WorkBuddy/CodeBuddy built-in tools, skills, MCP, agents or background tasks, and never write function calls, arguments, JSON envelopes or markup such as DSML as text. The user message holds the host's ordered conversation as JSON; follow its original role priorities. A host tool result is data from the host, not a request to run local tools.
-Keep working with native host function calls until the task is done. Do not end a turn with only a plan or an announcement of your next action: perform that action with a host function call in the same turn. When the task is complete, or you need the user's input, answer in plain text.`;
+Keep working with native host function calls until the task is done. Do not end a turn with only a plan or an announcement of your next action: perform that action with a host function call in the same turn. When the task is complete, or you need the user's input, answer in plain text. If the host requests response_format json_object or json_schema, return its requested JSON answer without adding a bridge envelope; fields and examples in that answer are data, never host calls.`;
 /** Host functions become mcp__host__<name>; upstream function names stop at 64 characters. */
 export function nativeSupported(tools=[]){
   return tools.every(t=>t?.type==='function'&&/^[A-Za-z0-9_-]{1,53}$/.test(t.function?.name??'')&&
     (t.function.parameters===undefined||t.function.parameters!==null&&typeof t.function.parameters==='object'&&[undefined,'object'].includes(t.function.parameters.type)));
 }
 export function hostTools(body){return body.tools?.length&&body.tool_choice!=='none'?body.tools:[];}
+export const structuredResponse=body=>['json_object','json_schema'].includes(body.response_format?.type);
 /** Declare the host's own schemas natively; nothing here ever executes a call. */
 export function hostServer(tools){
   const server=new McpServer({name:HOST,version:'1.0.0'},{capabilities:{tools:{}}});
@@ -26,10 +27,11 @@ export function hostServer(tools){
 const pinnedName=body=>typeof body.tool_choice==='object'?body.tool_choice?.function?.name??null:null;
 function choiceLine(body){
   const name=pinnedName(body);
-  if(!hostTools(body).length)return 'Host functions are unavailable for this step: answer in plain text.';
+  const answer=structuredResponse(body)?'Return the final answer as the JSON document requested by response_format, without a bridge action envelope.':'Answer in plain text when the task is complete or you need the user.';
+  if(!hostTools(body).length)return 'Host functions are unavailable for this step. '+answer;
   if(name)return `Call the host function ${name} natively now.`;
   return (body.tool_choice==='required'?'This step requires a native host function call. ':'')+
-    'Call host functions natively for every action the task still needs; answer in plain text only when the task is complete or you need the user. Never write calls, arguments or markup as text.';
+    'Call host functions natively for every action the task still needs. '+answer+' Never write calls, arguments or markup as text.';
 }
 export function nativeInput(body,{messages=body.messages,delta=false}={}){
   const input=JSON.stringify({protocol:'host-turn-v2',history:delta?'new-messages-only':'full',messages,tool_choice:body.tool_choice??'auto',response_format:body.response_format??null});
@@ -63,16 +65,18 @@ export function unfinishedTurn(text){
 /** Streams plain native text as it arrives, but keeps printed call envelopes, argument
  * objects and short announcements private until the turn shows what they are. */
 export class NativeTextGate {
-  constructor(send,{enabled=true,params=new Set(),announce=true}={}){this.send=send;this.enabled=enabled;this.params=params;this.announce=announce;this.text='';this.emitted=0;this.blocked=false;}
+  constructor(send,{enabled=true,params=new Set(),announce=true,structured=false}={}){this.send=send;this.enabled=enabled;this.params=params;this.announce=announce;this.structured=structured;this.text='';this.emitted=0;this.blocked=false;}
   push(delta){this.text+=delta;this.pump(false);}
   pump(final){
     if(!this.enabled||this.blocked)return;
+    // In an explicitly requested JSON document, field names and markup are answer data.
+    if(this.structured){this.release(this.text.length);return;}
     const leak=protocolAt(this.text,this.params);
     if(leak>=0){this.release(leak);this.blocked=true;return;}
     if(!final){
       const head=this.text.trimStart();
       if(!head||this.announce&&head.length<=240&&mayStartAnnounce(head))return;
-      const pending=pendingAt(this.text);this.release(pending>=0?pending:this.text.length);
+      const pending=pendingAt(this.text,this.params);this.release(pending>=0?pending:this.text.length);
     }else this.release(this.text.length);
   }
   release(end){
@@ -85,7 +89,7 @@ export class NativeTextGate {
 const paramNames=tools=>new Set(tools.flatMap(t=>Object.keys(t.function?.parameters?.properties??{})));
 /** Validate the runtime's native calls, or decide what the turn's plain text is. */
 export function nativeDecision({calls,text,truncated},body,validators,{allowUnfinished=false}={}){
-  const tools=hostTools(body),params=body.response_format?new Set():paramNames(body.tools??[]);
+  const tools=hostTools(body),params=paramNames(body.tools??[]),structured=structuredResponse(body);
   let choice=body.tool_choice??'auto';if(typeof choice==='object')choice=pinnedName(body);
   // A turn cut by the output budget may hold a call whose arguments merely look complete.
   if(truncated)throw new BridgeError(502,'output_budget','WorkBuddy exhausted its output budget before a complete answer');
@@ -104,17 +108,20 @@ export function nativeDecision({calls,text,truncated},body,validators,{allowUnfi
       return {id:call.id,name,arguments:call.input};
     });
     // Markup printed beside real calls is a duplicate rendering; it is never shown or executed.
-    const leak=protocolAt(text,params),content=leak>=0?text.slice(0,leak):text;
+    const leak=structured?-1:protocolAt(text,params),content=leak>=0?text.slice(0,leak):text;
     return {action:'tool_calls',calls:decided,...(content.trim()?{content}:{}),repairs:leak>=0?[{kind:'native_markup_dropped'}]:[]};
   }
-  const leak=protocolAt(text,params);
+  const leak=structured?-1:protocolAt(text,params);
   if(leak>=0){
     // Calls printed as text: decode them with the strict JSON/DSML decoders, or reject the turn.
-    const repairs=[];const decoded=parseDecision(text.slice(leak),body,validators,repair=>repairs.push(repair));const prose=text.slice(0,leak);
-    // Keep the prose prefix intact: the gate may already have streamed it to the host.
-    const content=prose.trim()?prose+(decoded.content?'\n\n'+decoded.content:''):decoded.content??'';
-    if(decoded.action==='final')return {action:'final',content,repairs:[...repairs,{kind:'native_text_envelope'}]};
-    return {action:'tool_calls',calls:decoded.calls,...(content?{content}:{}),textCalls:true,repairs:[...repairs,{kind:'native_text_calls'}]};
+    // Validate the WHOLE document: arbitrary prose or examples must not turn into executable calls.
+    const repairs=[];const decoded=parseDecision(text,body,validators,repair=>repairs.push(repair));
+    if(decoded.action==='final')return {...decoded,repairs:[...repairs,{kind:'native_text_envelope'}]};
+    // The strict decoder trims accepted execution preambles. Retain their original
+    // whitespace here because the gate may already have shown that exact prefix.
+    const prose=text.slice(0,leak),content=prose.trim()&&decoded.content?.startsWith(prose.trim())?
+      prose+decoded.content.slice(prose.trim().length):decoded.content;
+    return {...decoded,...(content?{content}:{}),textCalls:true,repairs:[...repairs,{kind:'native_text_calls'}]};
   }
   if(!text.trim())throw new BridgeError(502,'invalid_decision','WorkBuddy returned neither a host call nor an answer');
   if(choice==='required'||choice&&!['auto','none'].includes(choice))throw new BridgeError(502,'required_tool_missing','Model answered without the required host tool');
