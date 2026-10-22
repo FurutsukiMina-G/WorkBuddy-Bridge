@@ -30,6 +30,9 @@ export function summarize(input){
       cacheReportedRequests:cache.length,cacheHitRatio:cachePrompt?cached/cachePrompt:null},
     medianFirstTextMs:p50(inference.map(r=>r.firstTextMs)),medianFirstThinkingMs:p50(inference.map(r=>r.firstThinkingMs)),medianWallMs:p50(inference.map(r=>r.wallMs)),
     medianOutputTokensPerSecond:p50(inference.map(r=>r.context?.outputTokensPerSecond)),
+    runtime:{toolModes:Object.fromEntries(['native','json'].map(m=>[m,rows.filter(r=>r.context?.toolMode===m).length])),warmStarts:rows.filter(r=>r.context?.warmStart).length,
+      medianColdReadyMs:p50(inference.filter(r=>!r.context?.warmStart).map(r=>r.context?.runtimeReadyMs)),medianWarmReadyMs:p50(inference.filter(r=>r.context?.warmStart).map(r=>r.context?.runtimeReadyMs)),
+      unfinishedCorrections:sum(rows,r=>(r.context?.attempts??[]).filter(a=>a.errorCode==='unfinished_turn').length)},
     context:{deltaRequests:rows.filter(r=>r.context?.historyMode==='delta').length,resetRequests:rows.filter(r=>r.context?.reset).length,
       charactersAvoided:sum(rows,r=>r.context?.charactersAvoided),echoCharactersAvoided:sum(rows,r=>r.context?.echoCharactersAvoided),toolsReused:rows.filter(r=>r.context?.toolsReused).length},
     credits:null,source:'workbuddy-official-sdk; local replays excluded from upstream token/cache totals'};

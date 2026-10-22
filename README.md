@@ -4,6 +4,8 @@
 
 独立常驻的 WorkBuddy → DeepSeek Harness 桥。正式推理使用腾讯官方 `@tencent-ai/agent-sdk@0.3.286` 驱动本机 WorkBuddy 运行时，不依赖 `dsh-connect-workbuddy` 插件进程。
 
+`0.3.0` 默认改为原生宿主函数：DSH 的工具按原 JSON Schema 声明为运行时的进程内函数（`mcp__host__<name>`），模型直接产生结构化调用，桥在执行前拦截并整批校验后交给 DSH；最终回复是普通文本，不再要求 JSON 外壳。此前 57% 的请求首轮因 JSON/DSML 文本格式被拒，拒绝尝试占全部耗时的 48%、输入 token 的 46%、输出 token 的 72%；真实 Flash 验收中原生模式 0 次格式纠正。返回工具调用后，下一轮的运行时在 DSH 执行工具期间预先启动，续接轮运行时就绪从约 2.5 秒降到约 0.7 秒。文本中的调用标记、参数对象和只宣布下一步却不调用的回复不会流给 DSH。旧文本协议保留为 `WORKBUDDY_TOOL_MODE=json`。见 [原生宿主函数与预启动](docs/native-tools-20261022.md)。
+
 `0.2.3` 根据使用记录优化本地格式解码：兼容参数完整、类型显式的 DSML 结束标签变体，以及完整工具 JSON 前的简短执行说明。32 份保留拒绝样本离线重放中，除旧版已支持的 2 份外，新增 17 份可直接通过校验并以一次模拟 SDK 调用交付；无需额外格式纠正。完整参数、批次边界及 Schema 校验继续生效。见 [格式与用量优化](docs/format-optimization-20261022.md)。
 
 `0.2.0` 对齐 QoderBridge 的 Flash 核心桥接路径：正文和思考实时 SSE、官方 token/缓存统计与汇总、原生会话恢复、新增消息与未变工具 schema 去重、两分钟本地结果重放、最多两次请求内格式纠正及相同失败请求断路。工具参数始终整批通过完整 JSON Schema 校验后交付；不执行本机工具、不切模型。具体口径和功能对照见 [优化与验收说明](docs/optimization-20261021.md)。
@@ -17,15 +19,15 @@
 ## 运行方式
 
 ```text
-DSH 首轮完整上下文 / 后续新增消息与变化的工具 schema
+DSH 首轮完整上下文 / 后续只发新增消息
   → 127.0.0.1:8647/v1/chat/completions
-  → 官方 Agent SDK + 已安装的 WorkBuddy runtime
-  → WorkBuddy CN / deepseek-v4.1-flash
-  → JSON / 完整 DSML 决策 + 完整 JSON Schema 校验
-  → 标准 tool_calls → DSH 执行工具 → 下一轮
+  → 官方 Agent SDK + 已安装的 WorkBuddy runtime（续接轮使用已预启动的运行时）
+  → WorkBuddy CN / deepseek-v4.1-flash，DSH 工具声明为原生函数 mcp__host__*
+  → 原生调用在执行前拦截 + 完整 JSON Schema 整批校验 / 普通文本最终回复
+  → 标准 tool_calls（沿用运行时调用 ID）→ DSH 执行工具 → 下一轮
 ```
 
-保持官方运行时的默认系统提示，追加桥接协议；DSH 原始消息按顺序放进结构化输入。桥不把 DSH 系统提示替换为 WorkBuddy 的顶层系统提示，不自行执行文件、Shell、MCP 或子代理。SDK 内的原生工具有显式禁用列表、权限拒绝与 `PreToolUse` 停止钩子。
+保持官方运行时的默认系统提示，追加桥接协议；DSH 原始消息按顺序放进结构化输入。桥不把 DSH 系统提示替换为 WorkBuddy 的顶层系统提示，不自行执行文件、Shell、MCP 或子代理。WorkBuddy 内置工具有显式禁用列表；宿主函数由进程内 MCP 服务声明，但其调用在 `PreToolUse` 钩子处拒绝并停止，桥只把调用转给 DSH，从不执行。
 
 ## 安装与使用
 
@@ -59,9 +61,10 @@ npm.cmd run dsh:smoke -- pwsh
 node scripts/dsh-result.mjs read
 node scripts/lifecycle-test.mjs
 node scripts/soak.mjs  # 有限 6 小时，每 30 分钟一个真实 Flash 请求
+node scripts/native-smoke.mjs  # 5 次真实 Flash 请求：原生调用、预启动续接、并行调用、流式回复
 ```
 
-`soak` 会产生真实模型用量，不自动无限续跑。结果写入 `reports/soak.json`。模拟时间推进测试不等同于真实 6 小时耐久测试。
+`native-smoke` 在独立端口与私有运行目录运行，不执行任何宿主工具；`--tools <文件>` 可改用本机记录的宿主工具清单，结果写入 `reports/native-smoke-latest.json`。`soak` 会产生真实模型用量，不自动无限续跑。结果写入 `reports/soak.json`。模拟时间推进测试不等同于真实 6 小时耐久测试。
 
 ## 11128 与稳定性边界
 
@@ -69,7 +72,7 @@ node scripts/soak.mjs  # 有限 6 小时，每 30 分钟一个真实 Flash 请�
 
 遇到 11128 会保留明确的 `workbuddy_11128` 错误，不把它冒充登录过期，不盲目重试、不切账号、不切模型。可以先用 WorkBuddy 官方客户端确认同一模型的可用性，再查看 `npm.cmd run status` 的脱敏 SDK 诊断。
 
-每个请求重新创建 SDK 进程并读取登录态，同一宿主会话通过官方 `resume` 恢复私有 transcript，只注入新增消息；不保留空闲认证子进程。完整宿主上下文仍由 DSH 持有。历史改写/压缩、身份、模型、窗口或 effort 变化会隔离或重建上下文。默认最多 8 个 transcript，空闲 1 小时清理；重启后不恢复路由，已退出 worker 留下的带归属标记目录会清理。每分钟维护认证；到期前 10 分钟单飞刷新，原子保存私有缓存。真实登录撤销或刷新 token 失效仍需要重新登录。
+每个模型轮次使用新的 SDK 进程并读取登录态，同一宿主会话通过官方 `resume` 恢复私有 transcript，只注入新增消息。返回工具调用后，下一轮的进程在 DSH 执行工具期间预先启动并完成初始化，只供选项完全一致的下一轮使用；超过 `WORKBUDDY_PREWARM_MS` 未用、选项或登录变化、会话被清理时立即关闭，最终回复后不预启动。完整宿主上下文仍由 DSH 持有。历史改写/压缩、身份、模型、窗口或 effort 变化会隔离或重建上下文。默认最多 8 个 transcript，空闲 1 小时清理；重启后不恢复路由，已退出 worker 留下的带归属标记目录会清理。每分钟维护认证；到期前 10 分钟单飞刷新，原子保存私有缓存。真实登录撤销或刷新 token 失效仍需要重新登录。
 
 ## 配置
 
@@ -85,6 +88,9 @@ node scripts/soak.mjs  # 有限 6 小时，每 30 分钟一个真实 Flash 请�
 | `WORKBUDDY_SESSION_IDLE_MS` | `3600000` | 空闲 transcript 清理期限 |
 | `WORKBUDDY_REPLAY_MS` | `120000` | 同一已成功请求的本地重放时限；0 关闭 |
 | `WORKBUDDY_DECISION_RETRIES` | `2` | 格式错误最多额外纠正次数；0 关闭；不重试渠道、认证、权限、取消或预算错误 |
+| `WORKBUDDY_TOOL_MODE` | `native` | `native` 把 DSH 工具声明为原生函数；`json` 恢复 0.2.x 的 JSON/DSML 文本协议 |
+| `WORKBUDDY_PREWARM_MS` | `120000` | 预启动的下一轮运行时最长等待时间；0 关闭预启动 |
+| `WORKBUDDY_MAX_WARM` | `4` | 同时保留的预启动运行时上限（每个约 140 MB） |
 | `DSH_CONNECTION_FILE` | 无 | 可选已有 DSH RPC 缓存，仅在核实进程/监听归属后使用 |
 | `DSH_LAUNCH_LOG` | DSH 启动日志 | 新的 DSH 登录地址来源，同样先验证端口归属 |
 

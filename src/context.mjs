@@ -43,16 +43,18 @@ export class ContextPool {
   stats(){return {sessions:this.records.size,locks:this.locks.size,mode:'sdk-resume',idleMs:this.cfg.sessionIdleMs??3600000,maxSessions:this.cfg.maxSessions??8};}
   async remove(record){
     this.records.delete(record.id);for(const map of [this.clients,this.tools])for(const [k,v]of map)if(v===record.id)map.delete(k);
+    this.onRemove?.(record);
     const parent=resolve(this.cfg.runtime,'sdk'),inside=relative(parent,resolve(record.dir));
     if(!inside||inside.startsWith('..')||isAbsolute(inside))return;
     const clean=()=>rm(record.dir,{recursive:true,force:true}).catch(()=>{});
     await clean();const timer=setTimeout(()=>{this.pendingCleanup.delete(timer);void clean();},10000);timer.unref();this.pendingCleanup.add(timer);
   }
   async sweep(){for(const r of this.records.values())if(!r.busy&&Date.now()-r.touched>(this.cfg.sessionIdleMs??3600000))await this.remove(r);}
-  async acquire(body,credential,signal){
+  async acquire(body,credential,signal,{mode='json'}={}){
     await this.cleanup;
     if(this.closed)throw new BridgeError(503,'shutting_down','Context pool closed');
-    const scope=digest({model:body.model,publicModel:body.bridge_public_model,effort:body.reasoning_effort,max:body.max_tokens,uid:credential.uid,domain:credential.domain});
+    // Native and JSON transcripts record host calls differently, so they never share a session.
+    const scope=digest({model:body.model,publicModel:body.bridge_public_model,effort:body.reasoning_effort,max:body.max_tokens,uid:credential.uid,domain:credential.domain,...(mode==='json'?{}:{mode})});
     const messages=semanticMessages(body.messages),hashes=messages.map(digest),requestHash=digest({...body,messages,stream:undefined,stream_options:undefined});
     const client=body.prompt_cache_key?scope+':'+digest(body.prompt_cache_key):null;
     let owner=client?this.clients.get(client):undefined;
@@ -94,10 +96,11 @@ export class ContextPool {
       const replay=record.requestHash===requestHash&&record.response&&Date.now()-record.completedAt<(this.cfg.replayMs??120000);
       const reused=!!record.sessionId&&!replay;
       // The last validated assistant decision is already in the native transcript.
-      // Only its host-assigned tool IDs need an acknowledgement, never its large arguments.
+      // Only its host-assigned tool IDs need an acknowledgement, never its large arguments;
+      // native calls already carry the runtime's own IDs and need none.
       const delta=reused?messages.slice(record.history.length):messages;
       let echo=null,echoCharactersAvoided=0;
-      if(reused&&record.message?.tool_calls?.length){
+      if(reused&&record.echo!==false&&record.message?.tool_calls?.length){
         echo={role:'assistant',prior_decision_calls:record.message.tool_calls.map(c=>({id:c.id,name:c.function.name,arguments_sha256:digest(c.function.arguments)})),content:'Host assigned these IDs to your preceding validated decision; arguments are unchanged. Only the following tool results describe execution.'};
         echoCharactersAvoided=JSON.stringify(record.message).length;
         if(JSON.stringify(echo).length<echoCharactersAvoided)echoCharactersAvoided-=JSON.stringify(echo).length;
@@ -106,8 +109,8 @@ export class ContextPool {
       const toolSignature=digest(body.tools??[]),toolsReused=reused&&record.toolSignature===toolSignature;
       return {record,messages:echo?[echo,...delta]:delta,replay:replay?record.response:null,reused,toolsReused,
         metrics:{historyMode:reused?'delta':'full',sentMessageCount:delta.length,toolsReused,echoCharactersAvoided,reset,localReplay:!!replay},
-        commit:(response,message)=>{
-          record.requestHash=requestHash;record.response=response;record.message=message;record.completedAt=Date.now();record.toolSignature=toolSignature;
+        commit:(response,message,{echo=true}={})=>{
+          record.requestHash=requestHash;record.response=response;record.message=message;record.completedAt=Date.now();record.toolSignature=toolSignature;record.echo=echo;
           record.history=[...hashes,digest(semanticMessages([message])[0])];
           for(const c of message.tool_calls??[])this.tools.set(scope+':'+c.id,record.id);
         },release,discard:()=>this.remove(record)};

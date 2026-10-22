@@ -24,5 +24,5 @@ export class Provider {
     await this.ready();signal.throwIfAborted();return this.transport.chat(body,signal,context);
   }
   async close(){await this.transport.close();}
-  status(){return {transport:'official-workbuddy-sdk',verifiedModel:this.model?.id??null,catalogAt:this.catalogAt?new Date(this.catalogAt).toISOString():null,auth:this.auth.status(),lastError:this.lastError,sdk:{...this.transport.metrics},context:this.transport.pool.stats()};}
+  status(){return {transport:'official-workbuddy-sdk',toolMode:this.cfg.toolMode??'json',verifiedModel:this.model?.id??null,catalogAt:this.catalogAt?new Date(this.catalogAt).toISOString():null,auth:this.auth.status(),lastError:this.lastError,sdk:{...this.transport.metrics},context:this.transport.pool.stats()};}
 }

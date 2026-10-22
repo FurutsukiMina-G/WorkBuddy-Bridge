@@ -17,4 +17,10 @@ export function sumUsage(items){
   if(known.every(u=>valid(u.cache_creation_input_tokens)))out.cache_creation_input_tokens=known.reduce((n,u)=>n+u.cache_creation_input_tokens,0);
   return out;
 }
+/** Advance the cumulative Result.usage baseline by a turn that ended without a Result. */
+export function addSdkUsage(base,turn){
+  const out={};
+  for(const key of ['input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens'])if(valid(base?.[key])&&valid(turn?.[key]))out[key]=base[key]+turn[key];
+  return valid(out.input_tokens)&&valid(out.output_tokens)?out:undefined;
+}
 export const replayUsage=()=>({prompt_tokens:0,completion_tokens:0,total_tokens:0,bridge_usage_source:'local-response-replay',bridge_cache_status:'not_applicable',bridge_credits:null});
