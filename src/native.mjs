@@ -2,7 +2,7 @@ import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {ListToolsRequestSchema,CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
 import {BridgeError} from './errors.mjs';
 import {parseDecision} from './decision.mjs';
-import {protocolAt,pendingAt} from './protocol-text.mjs';
+import {protocolAt,scanText,hasDsml,partialAt} from './protocol-text.mjs';
 export const HOST='host',PREFIX=`mcp__${HOST}__`;
 // The runtime records this as the denied call's tool_result, so the next turn reads naturally.
 export const FORWARDED='Forwarded to the external host for execution. The host returns its result in the next user message under this call id; do not repeat the call before then.';
@@ -56,35 +56,98 @@ const ANNOUNCE_PREFIX_EN=/^(?:(?:ok(?:ay)?|alright|sure|now|next|first|then|grea
 const ANNOUNCE_PREFIX_ZH=/^(?:(?:好的?|嗯|现在|接下来|下面|然后|首先|那么)[，,。！!：:\s]*)*(?:好|现|接(?:下来?)?|下(?:面)?|然(?:后)?|首(?:先)?|那(?:么)?|我|让|先|继续?)?$/;
 const DONE=/已完成|已经完成|完成了|已(?:写好|写入|修改|改好|创建|更新|修复|删除|运行|确认)|总结|结论|如下|以下是|\b(?:done|completed?|finished|summary|summari[sz]e|in short|updated|fixed|added|created|removed|changed|implemented|verified)\b|\bhere(?:'s| is| are)\b/i;
 const mayAnnounce=text=>ANNOUNCE_EN.test(text)||ANNOUNCE_ZH.test(text);
-const mayStartAnnounce=text=>mayAnnounce(text)||text.length<=24&&(ANNOUNCE_PREFIX_EN.test(text)||ANNOUNCE_PREFIX_ZH.test(text));
+export const mayStartAnnounce=text=>mayAnnounce(text)||text.length<=24&&(ANNOUNCE_PREFIX_EN.test(text)||ANNOUNCE_PREFIX_ZH.test(text));
 /** A short reply that only announces its next action ends the host task without doing it. */
 export function unfinishedTurn(text){
   const t=String(text).trim();
   return !!t&&t.length<=240&&!/```/.test(t)&&!/[?？]\s*$/.test(t)&&mayAnnounce(t)&&!DONE.test(t);
 }
+/** Stream text from `start` on as received chunks. Appending to one growing string would make
+ * V8 copy all of it on every read, so reads walk back from the newest chunk instead. */
+class Chunks {
+  constructor(){this.list=[];this.first=0;this.start=0;this.end=0;}
+  push(text){this.list.push(text);this.end+=text.length;}
+  slice(from,to){
+    const pieces=[];let at=this.end;
+    for(let k=this.list.length-1;k>=this.first&&at>from;k--){
+      const chunk=this.list[k],start=at-chunk.length;
+      if(start<to)pieces.push(chunk.slice(Math.max(0,from-start),Math.min(chunk.length,to-start)));
+      at=start;
+    }
+    return pieces.reverse().join('');
+  }
+  drop(to){
+    while(this.first<this.list.length&&this.start+this.list[this.first].length<=to){this.start+=this.list[this.first].length;this.first++;}
+    if(this.first<this.list.length&&this.start<to){this.list[this.first]=this.list[this.first].slice(to-this.start);this.start=to;}
+    if(this.first>64&&this.first*2>this.list.length){this.list=this.list.slice(this.first);this.first=0;}
+  }
+  text(){const text=this.list.slice(this.first).join('');this.list=[text];this.first=0;return text;}
+}
+// First characters that can open a fence, inline code, a JSON head or an envelope on a line.
+const LINE_OPENERS='`~{<"｜｟';
 /** Streams plain native text as it arrives, but keeps printed call envelopes, argument
- * objects and short announcements private until the turn shows what they are. */
+ * objects and short announcements private until the turn shows what they are.
+ * Long answers stay linear: settled lines are never scanned again, and a long open line
+ * is checked only where it grew. The full text is joined only when it is read. */
 export class NativeTextGate {
-  constructor(send,{enabled=true,params=new Set(),announce=true,structured=false}={}){this.send=send;this.enabled=enabled;this.params=params;this.announce=announce;this.structured=structured;this.text='';this.emitted=0;this.blocked=false;}
-  push(delta){this.text+=delta;this.pump(false);}
-  pump(final){
+  constructor(send,{enabled=true,params=new Set(),announce=true,structured=false}={}){
+    this.send=send;this.enabled=enabled;this.params=params;this.announce=announce;this.structured=structured;
+    this.parts=[];this.length=0;this.emitted=0;this.blocked=false;
+    // window: text from `base`, the first line whose classification can still change.
+    this.window=new Chunks();this.base=0;this.fenced=false;this.line=0;this.lineHead=null;this.tail='';
+    this.prefix='';this.lead=-1;this.headSettled=false;
+  }
+  get text(){if(this.parts.length>1)this.parts=[this.parts.join('')];return this.parts[0]??'';}
+  get emittedText(){return this.text.slice(0,this.emitted);}
+  push(delta){
+    if(!delta)return;
+    const start=this.length;this.parts.push(delta);this.length+=delta.length;
+    if(!this.enabled||this.blocked)return;
+    this.window.push(delta);if(!this.headSettled)this.prefix+=delta;
+    const breakAt=delta.lastIndexOf('\n');if(breakAt>=0){this.line=start+breakAt+1;this.lineHead=null;}
+    if(this.lineHead===null){const from=Math.max(0,this.line-start),at=delta.slice(from).search(/\S/);if(at>=0)this.lineHead=delta[from+at];}
+    const before=this.tail;this.tail=(before+delta).slice(-12);
+    this.pump(false,before.slice(-11)+delta);
+  }
+  pump(final,fresh=''){
     if(!this.enabled||this.blocked)return;
     // In an explicitly requested JSON document, field names and markup are answer data.
-    if(this.structured){this.release(this.text.length);return;}
-    const leak=protocolAt(this.text,this.params);
-    if(leak>=0){this.release(leak);this.blocked=true;return;}
-    if(!final){
-      const head=this.text.trimStart();
-      if(!head||this.announce&&head.length<=240&&mayStartAnnounce(head))return;
-      const pending=pendingAt(this.text,this.params);this.release(pending>=0?pending:this.text.length);
-    }else this.release(this.text.length);
+    if(this.structured){this.release(this.length);this.forget(this.emitted,false);return;}
+    const scan=this.quickScan(fresh)??this.fullScan();
+    if(scan.leak>=0){this.release(scan.leak);this.blocked=true;this.window=new Chunks();return;}
+    if(final||!this.holdHead())this.release(!final&&scan.pending>=0?scan.pending:this.length);
+    // Settled lines are never scanned again, but the window keeps any text not yet released.
+    if(scan.settled<=this.emitted)this.forget(scan.settled,scan.fenced);
+  }
+  /** When the window is just the open line, and that line is inside a fence or starts with a character
+   * that cannot open code, a JSON head or an envelope, only DSML (anywhere) and a marker split at
+   * the end can still matter there. New raw characters with DSML go to the exact scan. */
+  quickScan(fresh){
+    if(this.line!==this.base)return null;
+    if(this.fenced)return {leak:-1,pending:-1,settled:this.base,fenced:true};
+    if(this.lineHead===null||LINE_OPENERS.includes(this.lineHead)||hasDsml(fresh))return null;
+    return {leak:-1,pending:partialAt(this.tail,this.length),settled:this.base,fenced:false};
+  }
+  fullScan(){
+    const {leak,pending,settled}=scanText(this.window.text(),this.params,{fenced:this.fenced});
+    return {leak:leak<0?-1:this.base+leak,pending:pending<0?-1:this.base+pending,settled:this.base+settled.offset,fenced:settled.fenced};
+  }
+  forget(to,fenced){if(to>this.base){this.window.drop(to);this.base=to;this.fenced=fenced;}}
+  /** Short announcements stay private. The head can turn into one again ("Ok, " then "Ok, I…"),
+   * so the first 241 non-blank characters are kept apart from the scan window. */
+  holdHead(){
+    if(this.headSettled)return false;
+    if(this.lead<0){const at=this.prefix.search(/\S/);if(at<0)return true;this.lead=at;}
+    const head=this.prefix.slice(this.lead,this.lead+241);
+    if(!this.announce||head.length>240){this.headSettled=true;this.prefix='';return false;}
+    return mayStartAnnounce(head);
   }
   release(end){
     if(end<=this.emitted)return;
-    if(/[\uD800-\uDBFF]/.test(this.text[end-1]??''))end--;
-    const text=this.text.slice(this.emitted,end);if(text){this.send(text);this.emitted=end;}
+    let text=this.window.slice(this.emitted,end);
+    if(/[\uD800-\uDBFF]/.test(text.at(-1)??'')){text=text.slice(0,-1);end--;}
+    if(text){this.send(text);this.emitted=end;}
   }
-  get emittedText(){return this.text.slice(0,this.emitted);}
 }
 const paramNames=tools=>new Set(tools.flatMap(t=>Object.keys(t.function?.parameters?.properties??{})));
 /** Validate the runtime's native calls, or decide what the turn's plain text is. */
