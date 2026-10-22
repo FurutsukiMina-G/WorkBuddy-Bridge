@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,rm} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
@@ -62,7 +62,7 @@ try{
   report={passed:true,at:new Date().toISOString(),transport:'official-workbuddy-sdk',toolMode:'native',verifiedModel:provider.model.id,hostTools:tools.length,
     steps,streaming:{firstTextMs:stream.firstTextMs,finishedAtMs:stream.finishedAtMs},summary:summarize(rows),requests:rows,warm:provider.transport.warm.stats};
 }catch(error){report={passed:false,at:new Date().toISOString(),error:String(error.message),steps,summary:summarize(rows),requests:rows,provider:provider.status()};process.exitCode=1;}
-finally{await bridge.close();}
+finally{await bridge.close();await rm(cfg.runtime,{recursive:true,force:true}).catch(()=>{});}
 await mkdir(cfg.reports,{recursive:true});const path=join(cfg.reports,'native-smoke-latest.json');await writeFile(path,JSON.stringify(report,null,2));
 console.log(JSON.stringify({passed:report.passed,error:report.error,report:path,steps:report.steps,streaming:report.streaming,runtime:report.summary.runtime,
   requests:rows.map(r=>({outcome:r.outcome,wallMs:r.wallMs,firstTextMs:r.firstTextMs,runtimeReadyMs:r.context?.runtimeReadyMs,warm:r.context?.warmStart,attempts:r.context?.attempts?.length,usage:r.usage&&[r.usage.prompt_tokens,r.usage.completion_tokens,r.usage.prompt_tokens_details?.cached_tokens]}))},null,2));

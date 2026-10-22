@@ -1,5 +1,5 @@
 import {query} from '@tencent-ai/agent-sdk';
-import {writeFile,mkdir} from 'node:fs/promises';
+import {writeFile,mkdir,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {config} from '../src/config.mjs';
@@ -21,5 +21,5 @@ try{
     const c=new Completion(body.model),r=await provider.chat(body,AbortSignal.timeout(120000));for await(const event of sseEvents(r.body))c.accept(event,body.model);c.validate();
     body.messages.push(c.result().choices[0].message,{role:'user',content:'Reply with the remembered marker only.'});
   }
-}finally{await provider.close();}
+}finally{await provider.close();await rm(cfg.runtime,{recursive:true,force:true}).catch(()=>{});}
 await mkdir(cfg.reports,{recursive:true});await writeFile(join(cfg.reports,'usage-probe.json'),JSON.stringify(snapshots,null,2));console.log(JSON.stringify(snapshots,null,2));

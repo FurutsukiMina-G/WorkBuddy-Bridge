@@ -14,8 +14,11 @@
     "smoke": "node scripts/smoke.mjs",
     "dsh:configure": "node scripts/configure-dsh.mjs",
     "dsh:smoke": "node scripts/dsh-smoke.mjs",
+    "dsh:result": "node scripts/dsh-result.mjs",
     "status": "node scripts/status.mjs",
     "metrics": "node scripts/metrics.mjs",
+    "reload:idle": "node scripts/reload-idle.mjs",
+    "native:smoke": "node scripts/native-smoke.mjs",
     "optimization:smoke": "node scripts/optimization-smoke.mjs"
   },
   "dependencies": {

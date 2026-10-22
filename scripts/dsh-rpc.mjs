@@ -1,8 +1,11 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
+import { ROOT } from '../src/config.mjs';
 import { dshFetch, windowsDshInventory, proveDshOrigin } from './dsh-endpoint.mjs';
 let connected;
-const cachePath = '.runtime/dsh-connection.json';
+const runtimeDir = join(ROOT, '.runtime');
+const cachePath = join(runtimeDir, 'dsh-connection.json');
 const localRoot = (value) => typeof value === 'string' &&
     /^http:\/\/127\.0\.0\.1:\d+$/.test(value);
 function request(connection, method, args, timeout = 30000) {
@@ -24,13 +27,13 @@ async function discover() {
         if (localRoot(saved.root) && typeof saved.cookie === 'string' && owned(saved.root)) {
             const probe = await request(saved, 'settings/describe', {}, 5000);
             if (probe.ok && (await probe.json()).result?.ok){
-                if(savedPath!==cachePath){await mkdir('.runtime',{recursive:true});await writeFile(cachePath,JSON.stringify(saved),{mode:0o600});}
+                if(savedPath!==cachePath){await mkdir(runtimeDir,{recursive:true});await writeFile(cachePath,JSON.stringify(saved),{mode:0o600});}
                 return saved;
             }
         }
     }
     catch { /* A cache miss or closed desktop is resolved through launch logs. */ }
-    for (const path of [process.env.DSH_LAUNCH_LOG, '.runtime/dsh-desktop-host.out.log',
+    for (const path of [process.env.DSH_LAUNCH_LOG, join(runtimeDir, 'dsh-desktop-host.out.log'),
         `${process.env.APPDATA}\\dsh-desktop\\logs\\dsh-host.log`].filter((x) => Boolean(x))) {
         try {
             const log = await readFile(path, 'utf8');
@@ -44,7 +47,7 @@ async function discover() {
                 if (visit.status !== 303 || !cookie)
                     continue;
                 const connection = { root, cookie };
-                await mkdir('.runtime', { recursive: true });
+                await mkdir(runtimeDir, { recursive: true });
                 await writeFile(cachePath, JSON.stringify(connection), { mode: 0o600 });
                 return connection;
             }
@@ -70,7 +73,7 @@ export async function rpc(method, args = {}) {
             `${result.result?.error?.code ?? 'unknown'}: ${result.result?.error?.message ?? 'No successful RPC result'}`);
     return result.result.value;
 }
-if (process.argv[1]?.endsWith('dsh-rpc.ts')) {
+if (process.argv[1]?.endsWith('dsh-rpc.mjs')) {
     const method = process.argv[2] ?? 'settings/describe';
     if (!['settings/describe', 'session/modelCatalog'].includes(method))
         throw new Error('CLI is read-only');

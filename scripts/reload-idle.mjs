@@ -17,7 +17,7 @@ const initial=await health();let verifiedPid=initial.pid,idleSince=null;
 if(!owned(verifiedPid,'src/main.mjs'))throw new Error('Worker ownership not verified');
 console.log(JSON.stringify({event:'waiting_for_idle',targetVersion:cfg.version,maxWaitMs:120000,minimumIdleMs:2000}));
 while(Date.now()-start<120000){
-  const h=await health();if(h.version===cfg.version&&h.ready){after=h;break;}
+  const h=await health();if(h.pid!==initial.pid&&h.version===cfg.version&&h.ready){after=h;break;}
   if(h.pid!==verifiedPid){if(!owned(h.pid,'src/main.mjs'))throw new Error('Replacement worker ownership not verified');verifiedPid=h.pid;idleSince=null;}
   if(h.active===0&&h.queued===0){
     idleSince??=Date.now();

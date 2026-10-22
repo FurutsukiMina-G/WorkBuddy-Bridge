@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { win32, resolve } from 'node:path';
+import { win32, join } from 'node:path';
+import { ROOT } from '../src/config.mjs';
 const normalize = (path) => path.replaceAll('/', '\\').toLowerCase();
 const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function hasArgument(command, path) {
@@ -54,7 +55,7 @@ export async function windowsDshInventory() {
     if (process.platform !== 'win32')
         throw new Error('DSH process ownership verification is currently supported on Windows only');
     try {
-        const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', resolve('scripts/dsh-owned-listeners.ps1')], { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024, encoding: 'utf8' });
+        const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', join(ROOT, 'scripts/dsh-owned-listeners.ps1')], { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024, encoding: 'utf8' });
         const parsed = JSON.parse(stdout.replace(/^\uFEFF/, ''));
         if (!Array.isArray(parsed.processes) || !Array.isArray(parsed.listeners))
             throw new Error('Invalid process snapshot');

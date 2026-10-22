@@ -1,5 +1,5 @@
-import {readFile,writeFile} from 'node:fs/promises';
-import {join} from 'node:path';
+import {readFile,writeFile,rm} from 'node:fs/promises';
+import {join,resolve,relative,isAbsolute} from 'node:path';
 import {rpc} from './dsh-rpc.mjs';
 import {cfg} from './local-api.mjs';
 const tool=process.argv[2]??'read';if(!['read','pwsh'].includes(tool))throw new Error('Use read or pwsh');
@@ -19,6 +19,10 @@ const usageMapped=usage.length>=2&&usage.every(u=>Number.isSafeInteger(u.inputTo
   u.inputTokens>=0&&u.outputTokens>0&&u.cacheReadTokens>=0&&u.inputTokens+u.outputTokens+u.cacheReadTokens===u.totalTokens);
 const passed=calls.includes(tool)&&successfulTool&&completed&&finalText.trim()===report.marker&&usageMapped;
 const result={sessionId:report.sessionId,tool,passed,running:session.running,throughSeq:session.projections?.asOfSeq,calls,successfulTool,completed,finalMarkerMatches:finalText.trim()===report.marker,usageMapped,usage};
+if((completed||!session.running)&&process.argv.includes('--cleanup')){
+  if(report.cwd){const parent=resolve(cfg.runtime,'dsh-smoke'),inside=relative(parent,resolve(report.cwd));if(inside&&!inside.startsWith('..')&&!isAbsolute(inside))await rm(report.cwd,{recursive:true,force:true}).catch(()=>{});}
+  result.cleaned=true;
+}
 await writeFile(join(cfg.reports,`dsh-validation-${tool}.json`),JSON.stringify(result,null,2));
 console.log(JSON.stringify({...result,...process.argv.includes('--verbose')?{events:summaries}:{}},null,2));
 if((completed||!session.running)&&!passed)process.exitCode=1;
