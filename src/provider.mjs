@@ -7,8 +7,8 @@ export class Provider {
     this.cfg=cfg;this.client=client;this.auth=auth??new AuthManager({...cfg,refresh:c=>client.refreshToken(c)});
     this.model=null;this.catalogAt=0;this.catalogFlight=null;this.lastError=null;this.transport=new SdkTransport(cfg,this.auth);
   }
-  async ready(){
-    if(this.model&&Date.now()-this.catalogAt<300000)return this.model;
+  async ready({maxAgeMs=300000}={}){
+    if(this.model&&Date.now()-this.catalogAt<maxAgeMs)return this.model;
     this.catalogFlight??=this.discover().finally(()=>{this.catalogFlight=null;});return this.catalogFlight;
   }
   async discover(){

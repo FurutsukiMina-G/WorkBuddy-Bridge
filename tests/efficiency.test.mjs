@@ -37,6 +37,18 @@ test('native resume injects only new messages, reuses exact schemas and avoids a
   assert.match(received[1].prompt,/HOST_RESULT/);assert.match(received[1].prompt,/tools_unchanged/);assert.match(received[1].prompt,new RegExp(message.tool_calls[0].id));
   assert.equal(second.metrics.historyMode,'delta');assert.ok(second.metrics.echoCharactersAvoided>10000);assert.ok(second.metrics.charactersAvoided>20000);
 });
+test('native resume preserves session when DSH prepends acp block tags to assistant history',async t=>{
+  const received=[];let turn=0;
+  const transport=await fixture(t,async function*(input){
+    received.push(input);
+    const text=++turn===1?JSON.stringify({action:'tool_calls',content:'Preparing file.',calls:[{name:'write',arguments:{text:'hello'}}]}):'{"action":"final","content":"done"}';
+    yield* events(text);
+  });
+  const first=await collect(transport,{...body,tools});const message=first.result.choices[0].message;
+  const tagged={...message,content:`<acp tokens="9" type="text">m00003</acp>\n${message.content??''}`};
+  const second=await collect(transport,{...body,tools,messages:[...body.messages,tagged,{role:'tool',tool_call_id:message.tool_calls[0].id,content:'OK'}]});
+  assert.equal(received[1].options.resume,'fixture-session');assert.equal(second.metrics.historyMode,'delta');assert.equal(second.metrics.sessionReset,undefined);
+});
 test('identical retries retain tool IDs, do not call the model, and report local zero usage',async t=>{
   let calls=0;const transport=await fixture(t,async function*(){calls++;yield* events(JSON.stringify({action:'tool_calls',calls:[{name:'write',arguments:{text:'x'}}]}));});
   const request={...body,tools};const first=await collect(transport,request),retry=await collect(transport,request);

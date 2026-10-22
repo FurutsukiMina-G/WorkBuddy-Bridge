@@ -18,7 +18,7 @@ await new Promise(resolve=>bridge.server.listen(cfg.port,'127.0.0.1',resolve));
 await writeFile(join(cfg.runtime,'worker.pid'),String(process.pid));
 console.log(JSON.stringify({event:'listening',service:'workbuddy-bridge',port:cfg.port,pid:process.pid,instanceId}));
 let maintaining=false;
-async function maintain(){if(maintaining)return;maintaining=true;try{await provider.auth.get();await provider.ready();provider.lastError=null;}catch(e){provider.lastError=publicError(e).body.error.code;}finally{maintaining=false;}}
+async function maintain(){if(maintaining)return;maintaining=true;try{await provider.auth.get();await provider.ready({maxAgeMs:240000});provider.lastError=null;}catch(e){provider.lastError=publicError(e).body.error.code;}finally{maintaining=false;}}
 void maintain();const timer=setInterval(()=>void maintain(),60000);timer.unref();
 let closing=false;async function close(){if(closing)return;closing=true;clearInterval(timer);await bridge.close();process.exit(0);}
 process.on('SIGTERM',close);process.on('SIGINT',close);

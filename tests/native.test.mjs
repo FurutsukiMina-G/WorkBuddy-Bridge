@@ -85,7 +85,7 @@ test('parallel host calls are assembled from the stream when only the first reac
   const {transport}=await fixture(t,[{streamed:true,calls:[{id:'call_00_P',name:'read',input:{file_path:'a.txt'}},{id:'call_01_Q',name:'write',input:{file_path:'b.txt',content:'中文 "q"'}}]}]);
   const {result,metrics}=await collect(transport);const calls=result.choices[0].message.tool_calls;
   assert.deepEqual(calls.map(c=>[c.id,c.function.name,JSON.parse(c.function.arguments)]),[['call_00_P','read',{file_path:'a.txt'}],['call_01_Q','write',{file_path:'b.txt',content:'中文 "q"'}]]);
-  assert.equal(result.usage.prompt_tokens,3933);assert.equal(result.usage.completion_tokens,96);assert.equal(metrics.attempts.length,1);
+  assert.equal(result.usage.prompt_tokens,3933);assert.equal(result.usage.completion_tokens,96);assert.equal(result.usage.cache_creation_input_tokens,989);assert.equal(metrics.attempts.length,1);
 });
 test('a streamed call whose arguments never complete is corrected, not forwarded',async t=>{
   let index=0;const {transport,seen}=await fixture(t,()=>index++===0?{streamed:true,calls:[{id:'call_00_R',name:'read',input:{file_path:'a.txt'}}]}:{calls:[{id:'call_00_S',name:'read',input:{file_path:'a.txt'}}]});

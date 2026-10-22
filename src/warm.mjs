@@ -13,7 +13,7 @@ export class WarmRuntimes {
     this.discard(key);
     if(!this.ttlMs||!this.max||this.entries.size>=this.max)return false;
     let handle;try{handle=create();}catch{return false;}
-    const timer=setTimeout(()=>{if(this.entries.get(key)?.handle===handle){this.stats.expired++;this.discard(key);}},this.ttlMs);timer.unref?.();
+    const timer=setTimeout(()=>{if(this.entries.get(key)?.handle===handle)this.discard(key,{expired:true});},this.ttlMs);timer.unref?.();
     this.entries.set(key,{fingerprint,handle,timer});this.stats.started++;return true;
   }
   /** Hand over the runtime only if every option it was started with still applies. */
@@ -23,6 +23,7 @@ export class WarmRuntimes {
     if(entry.fingerprint!==fingerprint||entry.handle.failed){this.stats.discarded++;entry.handle.close();return null;}
     this.stats.used++;return entry.handle;
   }
-  discard(key){const entry=this.entries.get(key);if(!entry)return;this.entries.delete(key);clearTimeout(entry.timer);entry.handle.close();}
+  fail(handle){this.stats.used=Math.max(0,this.stats.used-1);this.stats.discarded++;handle.close();}
+  discard(key,{expired=false}={}){const entry=this.entries.get(key);if(!entry)return;this.entries.delete(key);clearTimeout(entry.timer);if(expired)this.stats.expired++;else this.stats.discarded++;entry.handle.close();}
   close(){for(const key of [...this.entries.keys()])this.discard(key);}
 }

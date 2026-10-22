@@ -4,8 +4,18 @@ import {BridgeError} from './errors.mjs';
 import {parseDecision} from './decision.mjs';
 import {executionPreamble} from './execution-preamble.mjs';
 const hash=text=>createHash('sha256').update(text).digest('hex');
+const USAGE_KEYS=['input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens'];
+function mergeUsage(current,incoming){
+  if(!incoming||typeof incoming!=='object')return current;
+  if(current&&(current.input_tokens>0||current.output_tokens>0)&&incoming.input_tokens===0&&incoming.output_tokens===0)return current;
+  const next={...current,...incoming};
+  // Native tool-use turns emit a second message_delta with cache_creation_input_tokens=0
+  // after the tool_use delta already reported the positive cache creation count.
+  for(const key of USAGE_KEYS)if(Number.isSafeInteger(current?.[key])&&current[key]>0&&incoming[key]===0)next[key]=current[key];
+  return next;
+}
 export class DecisionOutput {
-  constructor(){this.result=null;this.text=[];this.seen=new Set();this.blockText=new Map();this.streamText=[];this.stopReasons=new Set();this.assistantUsage=null;this.assistantUsages=new Map();this.partialUsage=null;this.characters=0;this.usageBasis=null;}
+  constructor(){this.result=null;this.text=[];this.seen=new Set();this.blockText=new Map();this.streamText=[];this.stopReasons=new Set();this.assistantUsage=null;this.assistantUsages=new Map();this.partialUsage=null;this.lastUsage=undefined;this.characters=0;this.usageBasis=null;}
   observe(message){
     if(message.type==='result')this.result=message;
     if(message.type==='assistant'){
@@ -20,7 +30,7 @@ export class DecisionOutput {
     }
     if(message.type!=='stream_event')return;
     const event=message.event;
-    if(event?.type==='message_start'&&event.message?.usage)this.partialUsage={...this.partialUsage,...event.message.usage};
+    if(event?.type==='message_start'&&event.message?.usage)this.partialUsage=mergeUsage(this.partialUsage,event.message.usage);
     if(event?.type==='message_start')this.blockText.clear();
     if(event?.type==='content_block_start'&&event.content_block?.type==='text')this.blockText.set(event.index,event.content_block.text??'');
     if(event?.delta?.type==='text_delta'){
@@ -31,14 +41,14 @@ export class DecisionOutput {
       this.streamText.push(this.blockText.get(event.index));this.blockText.delete(event.index);
     }
     if(event?.delta?.stop_reason)this.stopReasons.add(event.delta.stop_reason);
-    if(event?.usage)this.partialUsage={...this.partialUsage,...event.usage};
+    if(event?.usage)this.partialUsage=mergeUsage(this.partialUsage,event.usage);
   }
   usage(previousResultUsage=null,{resumed=false}={}){
     const positive=u=>u&&(u.input_tokens>0||u.output_tokens>0);
     let terminal=this.result?.usage,terminalBasis='fresh-result';
     if(terminal&&previousResultUsage){
       const delta={};let regressed=false;
-      for(const key of ['input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens']){
+      for(const key of USAGE_KEYS){
         if(Number.isSafeInteger(terminal[key])&&Number.isSafeInteger(previousResultUsage[key])){
           if(terminal[key]<previousResultUsage[key])regressed=true;delta[key]=terminal[key]-previousResultUsage[key];
         }
@@ -57,16 +67,16 @@ export class DecisionOutput {
     const responses=[...this.assistantUsages.values()].filter(positive);
     if(responses.length){
       this.usageBasis='per-response-assistant';
-      if(responses.length===1)return completeCache({...this.partialUsage,...responses[0]});
-      const total={};for(const key of ['input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens'])
+      if(responses.length===1)return this.lastUsage=completeCache(mergeUsage(this.partialUsage,responses[0]));
+      const total={};for(const key of USAGE_KEYS)
         if(responses.every(u=>Number.isSafeInteger(u[key])&&u[key]>=0))total[key]=responses.reduce((n,u)=>n+u[key],0);
-      return total;
+      return this.lastUsage=total;
     }
-    if(positive(this.partialUsage)){this.usageBasis='per-response-stream';return completeCache(this.partialUsage);}
+    if(positive(this.partialUsage)){this.usageBasis='per-response-stream';return this.lastUsage=completeCache(this.partialUsage);}
     // Result.usage survives native resume and is CUMULATIVE. Never sum it as a turn.
     this.usageBasis=terminalBasis;
-    if(terminal?.input_tokens===0&&terminal?.output_tokens===0&&this.candidates().length)return undefined;
-    return terminal??undefined;
+    if(terminal?.input_tokens===0&&terminal?.output_tokens===0&&this.candidates().length)return this.lastUsage=undefined;
+    return this.lastUsage=terminal??undefined;
   }
   isTruncated(){return ['max_tokens','length','model_context_window_exceeded'].some(reason=>this.stopReasons.has(reason));}
   candidates(){
@@ -98,6 +108,6 @@ export class DecisionOutput {
     const wire=valid[0].text.trim().replace(/^```(?:json|xml|text)?[ \t]*\r?\n([\s\S]*)\r?\n```$/i,'$1').trim();
     return {decision:valid[0].decision,source:valid[0].source,format:/^<?\{/.test(wire)||valid[0].repairs.some(r=>r.kind==='json_execution_preamble')?'json':'dsml',repairs:valid[0].repairs};
   }
-  evidence(){return {resultSubtype:this.result?.subtype??null,result:this.result?.result??null,structuredOutput:this.result?.structured_output??null,assistantText:this.text,completedStreamText:this.streamText,stopReasons:[...this.stopReasons],usage:this.usage()??null};}
+  evidence(){return {resultSubtype:this.result?.subtype??null,result:this.result?.result??null,structuredOutput:this.result?.structured_output??null,assistantText:this.text,completedStreamText:this.streamText,stopReasons:[...this.stopReasons],usage:(this.lastUsage!==undefined?this.lastUsage:this.usage())??null};}
   summary(){return {resultSubtype:this.result?.subtype??null,stopReasons:[...this.stopReasons],outputs:this.candidates().map(({source,text})=>({source,characters:text.length,sha256:hash(text)}))};}
 }

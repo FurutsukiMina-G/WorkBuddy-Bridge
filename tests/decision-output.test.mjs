@@ -46,4 +46,11 @@ test('resumed Result usage is cumulative; assistant and stream usage belong to t
   assert.deepEqual(fallback.usage({input_tokens:3857,output_tokens:10,cache_read_input_tokens:2944,cache_creation_input_tokens:913},{resumed:true}),{input_tokens:3978,output_tokens:15,cache_read_input_tokens:3840,cache_creation_input_tokens:138});
   fallback.observe({type:'stream_event',event:{type:'message_delta',usage:{input_tokens:3978,output_tokens:15,cache_read_input_tokens:3840,cache_creation_input_tokens:0}}});
   assert.equal(fallback.usage({input_tokens:3857,output_tokens:10,cache_read_input_tokens:2944,cache_creation_input_tokens:913},{resumed:true}).cache_creation_input_tokens,138);
+  assert.equal(fallback.evidence().usage.cache_creation_input_tokens,138);
+  // A second message_delta with cache_creation=0 or a zero-token synthetic message_start must not clobber positive stream cache creation.
+  const nativeStream=new DecisionOutput();
+  nativeStream.observe({type:'stream_event',event:{type:'message_delta',usage:{input_tokens:3933,output_tokens:96,cache_read_input_tokens:2944,cache_creation_input_tokens:989}}});
+  nativeStream.observe({type:'stream_event',event:{type:'message_delta',usage:{input_tokens:3933,output_tokens:96,cache_read_input_tokens:2944,cache_creation_input_tokens:0}}});
+  nativeStream.observe({type:'stream_event',event:{type:'message_start',message:{usage:{input_tokens:0,output_tokens:0}}}});
+  assert.equal(nativeStream.usage().cache_creation_input_tokens,989);
 });

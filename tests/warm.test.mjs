@@ -62,15 +62,16 @@ test('a prestarted runtime that dies before initializing is replaced by a cold o
   const {transport,runs}=await fixture(t,[call,{dies:true},{text:'cold answer'}]);
   const first=await collect(transport,body);await sleep(450);
   const second=await collect(transport,next(first));
-  assert.equal(runs.length,3);assert.equal(second.metrics.warmFailed,true);assert.equal(second.metrics.warmStart,false);assert.equal(second.result.choices[0].message.content,'cold answer');
+  assert.equal(runs.length,3);assert.ok(runs[1].cleaned>=1);assert.equal(second.metrics.warmFailed,true);assert.equal(second.metrics.warmStart,false);assert.equal(second.result.choices[0].message.content,'cold answer');
+  assert.equal(transport.warm.stats.used,0);assert.equal(transport.warm.stats.discarded,1);
 });
 test('unused prestarted runtimes expire, and closing the transport ends them',async t=>{
   const expiring=await fixture(t,[call,{text:'never'}],{prewarmMs:150});
   await collect(expiring.transport,body);await sleep(650);
-  assert.ok(expiring.runs[1].cleaned>=1);assert.equal(expiring.transport.warm.stats.expired,1);assert.equal(expiring.transport.warm.size,0);
+  assert.ok(expiring.runs[1].cleaned>=1);assert.equal(expiring.transport.warm.stats.expired,1);assert.equal(expiring.transport.warm.stats.discarded,0);assert.equal(expiring.transport.warm.size,0);
   const closing=await fixture(t,[call,{text:'never'}]);
   await collect(closing.transport,body);await sleep(450);await closing.transport.close();
-  assert.ok(closing.runs[1].cleaned>=1);assert.equal(closing.transport.warm.size,0);
+  assert.ok(closing.runs[1].cleaned>=1);assert.equal(closing.transport.warm.stats.discarded,1);assert.equal(closing.transport.warm.size,0);
 });
 test('final answers start no runtime, and prestarting can be disabled',async t=>{
   const final=await fixture(t,[{text:'All done.'}]);await collect(final.transport,body);await sleep(450);assert.equal(final.runs.length,1);

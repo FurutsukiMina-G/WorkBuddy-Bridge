@@ -50,8 +50,11 @@ export function nativeCorrection(body,error){
 }
 const ANNOUNCE_EN=/^(?:(?:ok(?:ay)?|alright|sure|now|next|first|then|great)[,.!:]?\s+)*(?:I['’]ll|I will|I am going to|I['’]m going to|I['’]m now going to|let me(?!\s+know)|let['’]s)\b/i;
 const ANNOUNCE_ZH=/^(?:(?:好的?|嗯|现在|接下来|下面|然后|首先|那么)[，,。！!：:]?\s*)*(?:我(?:先|来|将|会|准备|再|继续|现在)|让我|先(?:读取|读|查看|看看?|检查|搜索|运行|执行|修改|写)|继续(?:读取|查看|检查|修改|处理))/;
+const ANNOUNCE_PREFIX_EN=/^(?:(?:ok(?:ay)?|alright|sure|now|next|first|then|great)\b[,.!:\s]*)*(?:o(?:k(?:ay)?)?|a(?:l(?:r(?:i(?:g(?:h(?:t)?)?)?)?)?)?|s(?:u(?:r(?:e)?)?)?|n(?:o(?:w)?|e(?:x(?:t)?)?)?|f(?:i(?:r(?:s(?:t)?)?)?)?|t(?:h(?:e(?:n)?)?)?|g(?:r(?:e(?:a(?:t)?)?)?)?|I(?:['’]?(?:l|ll|m)?|\s+(?:w(?:i(?:l|ll)?)?|a(?:m(?:\s+g(?:o(?:i(?:n(?:g(?:\s+t(?:o)?)?)?)?)?)?)?)?|n(?:o(?:w)?)?)?)?|l(?:e(?:t(?:['’]?s|\s+m(?:e)?)?)?)?)$/i;
+const ANNOUNCE_PREFIX_ZH=/^(?:(?:好的?|嗯|现在|接下来|下面|然后|首先|那么)[，,。！!：:\s]*)*(?:好|现|接(?:下来?)?|下(?:面)?|然(?:后)?|首(?:先)?|那(?:么)?|我|让|先|继续?)?$/;
 const DONE=/已完成|已经完成|完成了|已(?:写好|写入|修改|改好|创建|更新|修复|删除|运行|确认)|总结|结论|如下|以下是|\b(?:done|completed?|finished|summary|summari[sz]e|in short|updated|fixed|added|created|removed|changed|implemented|verified)\b|\bhere(?:'s| is| are)\b/i;
 const mayAnnounce=text=>ANNOUNCE_EN.test(text)||ANNOUNCE_ZH.test(text);
+const mayStartAnnounce=text=>mayAnnounce(text)||text.length<=24&&(ANNOUNCE_PREFIX_EN.test(text)||ANNOUNCE_PREFIX_ZH.test(text));
 /** A short reply that only announces its next action ends the host task without doing it. */
 export function unfinishedTurn(text){
   const t=String(text).trim();
@@ -68,7 +71,7 @@ export class NativeTextGate {
     if(leak>=0){this.release(leak);this.blocked=true;return;}
     if(!final){
       const head=this.text.trimStart();
-      if(!head||this.announce&&head.length<=240&&mayAnnounce(head))return;
+      if(!head||this.announce&&head.length<=240&&mayStartAnnounce(head))return;
       const pending=pendingAt(this.text);this.release(pending>=0?pending:this.text.length);
     }else this.release(this.text.length);
   }

@@ -9,6 +9,10 @@ export function stable(value){
   return value;
 }
 export const digest=value=>createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
+// DSH tags stored message blocks with <acp tokens="..." type="text">m00001</acp> on later turns.
+// Ignore only that host bookkeeping tag when checking whether prior history is unchanged.
+const stripAcp=text=>String(text).replace(/^(?:<acp\b[^>]*>m\d+<\/acp>\r?\n?)+/,'');
+const historyDigest=m=>digest(typeof m?.content==='string'?{...m,content:stripAcp(m.content)}:m);
 export function textContent(content){
   if(content==null)return '';
   if(typeof content==='string')return content;
@@ -55,7 +59,7 @@ export class ContextPool {
     if(this.closed)throw new BridgeError(503,'shutting_down','Context pool closed');
     // Native and JSON transcripts record host calls differently, so they never share a session.
     const scope=digest({model:body.model,publicModel:body.bridge_public_model,effort:body.reasoning_effort,max:body.max_tokens,uid:credential.uid,domain:credential.domain,...(mode==='json'?{}:{mode})});
-    const messages=semanticMessages(body.messages),hashes=messages.map(digest),requestHash=digest({...body,messages,stream:undefined,stream_options:undefined});
+    const messages=semanticMessages(body.messages),hashes=messages.map(historyDigest),requestHash=digest({...body,messages,stream:undefined,stream_options:undefined});
     const client=body.prompt_cache_key?scope+':'+digest(body.prompt_cache_key):null;
     let owner=client?this.clients.get(client):undefined;
     if(!client)for(const m of [...messages].reverse()){
@@ -111,7 +115,7 @@ export class ContextPool {
         metrics:{historyMode:reused?'delta':'full',sentMessageCount:delta.length,toolsReused,echoCharactersAvoided,reset,localReplay:!!replay},
         commit:(response,message,{echo=true}={})=>{
           record.requestHash=requestHash;record.response=response;record.message=message;record.completedAt=Date.now();record.toolSignature=toolSignature;record.echo=echo;
-          record.history=[...hashes,digest(semanticMessages([message])[0])];
+          record.history=[...hashes,historyDigest(semanticMessages([message])[0])];
           for(const c of message.tool_calls??[])this.tools.set(scope+':'+c.id,record.id);
         },release,discard:()=>this.remove(record)};
     }catch(e){if(owns)release();else void prior.then(release);throw e;}

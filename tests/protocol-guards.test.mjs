@@ -24,6 +24,11 @@ test('short announcements wait for the turn; long answers and finished reports s
   gate.push('，然后'+'逐项说明每个字段的含义与默认值。'.repeat(20));assert.ok(shown.length>200);
   shown='';const plain=new NativeTextGate(t=>{shown+=t;});plain.push('已完成：');assert.equal(shown,'已完成：');
   shown='';const json=new NativeTextGate(t=>{shown+=t;},{announce:false});json.push('我先说结论：');assert.equal(shown,'我先说结论：');
+  for(const tokens of [['I',"'ll read the config file."],['我','先读取配置文件。'],['Let',' me check the tests.']]){
+    let streamed='';const g=new NativeTextGate(t=>{streamed+=t;});
+    for(const tok of tokens)g.push(tok);
+    assert.equal(streamed,'',JSON.stringify(tokens));
+  }
 });
 test('only short replies that announce an action without delivering it count as unfinished',()=>{
   for(const text of ["I'll read the config file first.",'Let me check the tests.','我先读取 config.ts。','接下来我会运行测试。','好的，让我看看日志。','Now I will update the parser.'])assert.equal(unfinishedTurn(text),true,text);

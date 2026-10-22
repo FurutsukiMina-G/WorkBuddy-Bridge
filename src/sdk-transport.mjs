@@ -1,5 +1,4 @@
 import {query} from '@tencent-ai/agent-sdk';
-import {mkdir,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {existsSync} from 'node:fs';
@@ -11,7 +10,7 @@ import {ContextPool,digest,abortable} from './context.mjs';
 import {FinalTextProjector} from './streaming.mjs';
 import {normalizedUsage,sumUsage,replayUsage,addSdkUsage} from './usage.mjs';
 import {correctionInput} from './recovery.mjs';
-import {rejectedEvidence} from './rejection-evidence.mjs';
+import {rejectedEvidence,decisionErrorEvidence,redactSecrets} from './rejection-evidence.mjs';
 import {HOST,PREFIX,FORWARDED,NATIVE_INSTRUCTIONS,nativeSupported,hostTools,hostServer,nativeInput,nativeCorrection,nativeDecision,NativeTextGate} from './native.mjs';
 import {WarmRuntimes,promptQueue,userMessage} from './warm.mjs';
 export {normalizedUsage} from './usage.mjs';
@@ -19,7 +18,7 @@ export {normalizedUsage} from './usage.mjs';
 // their entire tool registry in the init event. The hook covers newly added tools.
 const DENIED_TOOLS=['Agent','Read','Write','Edit','Bash','Glob','Grep','PowerShell','EnterPlanMode','ExitPlanMode','TaskCreate','TaskGet','TaskUpdate','TaskList','WebFetch','WebSearch','TaskStop','TaskOutput','Skill','AskUserQuestion','StructuredOutput','ToolSearch','DeferExecuteTool','SendMessage','TeamCreate','TeamDelete','ImageGen','LibraryUpload','VideoGen','AudioTranscribe','A2AGetAgentCard','A2ASendMessage','A2AGetTask','A2ACancelTask','ListMcpResources','ReadMcpResource','MessageColleague','SpeakInChannel','ChannelTasks','CreateColleague','CreateChannel','ListColleagues'];
 const RETRYABLE=['invalid_decision','invalid_tool_arguments','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn'];
-const WARM_DELAY_MS=300,WARM_READY_MS=20000;
+const WARM_DELAY_MS=25,WARM_READY_MS=20000;
 // The runtime's own message once a denied host call has used the single permitted turn.
 const RUNTIME_STOP=/^Max turns \(\d+\) exceeded\.?$/i;
 export function sdkOptions(cfg,credential,body,dir,controller,onDenied,onStderr=()=>{},{native=false}={}){
@@ -75,9 +74,9 @@ export class SdkTransport {
     const handle=this.warm.take(record.id,this.warmKey(record,body,credential,native));if(!handle)return null;
     let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Prestarted runtime did not become ready')),WARM_READY_MS);});
     try{await abortable(Promise.race([handle.ready,timeout]),signal);}
-    catch(error){handle.close();if(signal.aborted)throw error;return null;}
+    catch(error){this.warm.fail(handle);if(signal.aborted)throw error;return null;}
     finally{clearTimeout(timer);}
-    if(handle.failed){handle.close();return null;}
+    if(handle.failed){this.warm.fail(handle);return null;}
     return handle;
   }
   async chat(body,signal,context={}){
@@ -133,9 +132,10 @@ export class SdkTransport {
               const stderr=s=>{runtimeStderr=(runtimeStderr+s).slice(-3000);};
               const warm=attempt===0&&native&&!warmFailed?await this.takeWarm(record,body,credential,native,signal):null;
               this.metrics.started++;if(attempt)this.metrics.correctionCalls++;
+              let relay=null;
               if(warm){
                 q=warm.query;warm.setStderr(stderr);metrics.warmStart=true;
-                const relay=()=>warm.controller.abort(controller.signal.reason);controller.signal.addEventListener('abort',relay,{once:true});if(controller.signal.aborted)relay();
+                relay=()=>warm.controller.abort(controller.signal.reason);controller.signal.addEventListener('abort',relay,{once:true});if(controller.signal.aborted)relay();
                 warm.push(prompt);
               }else{
                 const options=sdkOptions(this.cfg,credential,body,record.dir,controller,native?()=>{}:()=>{this.metrics.deniedTools++;},stderr,{native});
@@ -194,11 +194,11 @@ export class SdkTransport {
                 }
               }catch(error){
                 // A prestarted runtime that failed before initializing is replaced once, cold.
-                if(warm&&!initialized&&!signal.aborted&&!(error instanceof BridgeError)){warmFailed=true;metrics.warmStart=false;metrics.warmFailed=true;attempt--;continue;}
+                if(warm&&!initialized&&!signal.aborted&&!(error instanceof BridgeError)){this.warm.fail(warm);warmFailed=true;metrics.warmStart=false;metrics.warmFailed=true;attempt--;continue;}
                 // A native host call ends with the runtime's own stop after its denial; the call is complete.
                 closeCall();if(error instanceof BridgeError||signal.aborted||!native||!calls.length)throw error;
                 stoppedAtCall=true;
-              }
+              }finally{if(relay)controller.signal.removeEventListener('abort',relay);}
               closeCall();
               const result=output.result;
               usages.push(normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})}));usageRecorded=true;
@@ -286,15 +286,9 @@ export class SdkTransport {
             const rawMessage=String(error?.message??'');
             if(!(error instanceof BridgeError)&&/11128|unapproved channel|conversation id missing/i.test(rawMessage))error=new BridgeError(400,'workbuddy_11128','Official WorkBuddy runtime was rejected by channel validation (11128); no blind retry was performed');
             const safe=publicError(signal.aborted?signal.reason:error);
-            const redact=s=>String(s).replaceAll(credential.accessToken,'[redacted]').replaceAll(credential.refreshToken||'__NO_REFRESH_TOKEN__','[redacted]');
-            const diagnostic=redact(rawMessage).split('\n')[0].slice(0,320);let evidenceFile=null;
-            if([...RETRYABLE,'output_budget'].includes(safe.body.error.code)){
-              try{
-                const folder=join(this.cfg.runtime,'decision-errors');await mkdir(folder,{recursive:true});
-                evidenceFile=join(folder,`${Date.now()}-${randomUUID()}.json`);
-                await writeFile(evidenceFile,redact(JSON.stringify({requestId:context.requestId??id,model:body.model,errorCode:safe.body.error.code,...output.evidence()},null,2)),{mode:0o600});
-              }catch{evidenceFile=null;}
-            }
+            const redact=s=>redactSecrets(s,credential);
+            const diagnostic=redact(rawMessage).split('\n')[0].slice(0,320);
+            const evidenceFile=[...RETRYABLE,'output_budget'].includes(safe.body.error.code)?await decisionErrorEvidence(this.cfg,{requestId:context.requestId??id,model:body.model,errorCode:safe.body.error.code,output,credential}):null;
             this.metrics.lastFailure={at:new Date().toISOString(),code:safe.body.error.code,diagnostic,stderr:redact(runtimeStderr).slice(-800),output:output.summary(),evidenceFile};
             if(RETRYABLE.includes(safe.body.error.code)){
               if(this.failures.size>=32)this.failures.delete(this.failures.keys().next().value);
@@ -313,7 +307,7 @@ export class SdkTransport {
           }
         })();
       },
-      cancel:()=>{closed=true;controller.abort();q?.close?.();}
+      cancel:()=>{closed=true;controller.abort();q?.cleanup?.();q?.close?.();}
     });
     const response=new Response(stream,{headers:{'content-type':'text/event-stream'}});response.bridgeMetrics=metrics;return response;
   }
